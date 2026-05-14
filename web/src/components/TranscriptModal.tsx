@@ -1,4 +1,5 @@
 import type { AgentState } from "../store/runStore";
+import { RawEventLog } from "./RawEventLog";
 
 export function TranscriptModal({ agent }: { agent: AgentState }) {
   return (
@@ -8,9 +9,27 @@ export function TranscriptModal({ agent }: { agent: AgentState }) {
       <pre style={{ background: "#0c0c10", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", maxHeight: 240, overflowY: "auto", fontSize: 12 }}>
         {agent.prompt}
       </pre>
-      <div style={{ margin: "16px 0 8px" }}><strong>Assistant text</strong></div>
+      {agent.reasoning && (
+        <>
+          <div style={{ margin: "16px 0 8px" }}>
+            <strong>Reasoning / thinking</strong>
+            <span style={{ marginLeft: 8, fontSize: 11, opacity: 0.6 }}>
+              (model's chain-of-thought, opencode reasoning parts)
+            </span>
+          </div>
+          <pre style={{ background: "#0c0c10", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", maxHeight: 360, overflowY: "auto", fontSize: 12, color: "#b6a4ff" }}>
+            {agent.reasoning}
+          </pre>
+        </>
+      )}
+      <div style={{ margin: "16px 0 8px" }}>
+        <strong>Full LLM output</strong>
+        <span style={{ marginLeft: 8, fontSize: 11, opacity: 0.6 }}>
+          (every assistant text part, in order — tool calls listed below)
+        </span>
+      </div>
       <pre style={{ background: "#0c0c10", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", maxHeight: 360, overflowY: "auto", fontSize: 12 }}>
-        {agent.text || "(none)"}
+        {agent.rawText ?? agent.text ?? "(none)"}
       </pre>
       <div style={{ margin: "16px 0 8px" }}><strong>Final parsed output</strong></div>
       <pre style={{ background: "#0c0c10", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", maxHeight: 240, overflowY: "auto", fontSize: 12 }}>
@@ -32,6 +51,15 @@ export function TranscriptModal({ agent }: { agent: AgentState }) {
           </div>
         ))}
       </div>
+      <div style={{ margin: "16px 0 8px" }}>
+        <strong>All raw events</strong>
+        <span style={{ marginLeft: 8, fontSize: 11, opacity: 0.6 }}>
+          (every SSE event opencode emitted for this session — including
+          types we don't model: subtask, file, step-start/finish, snapshot,
+          patch, agent, retry, compaction, todo.updated, file.edited, etc.)
+        </span>
+      </div>
+      <RawEventLog events={agent.rawEvents} maxHeight={520} defaultOpen />
     </div>
   );
 }

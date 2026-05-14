@@ -36,10 +36,17 @@ export interface AssembledToolCall {
 
 export interface TrackerCallbacks {
   onTokenDelta: (partID: string, ordinal: number, delta: string) => void;
+  onReasoningDelta: (partID: string, ordinal: number, delta: string) => void;
   onToolStart: (call: AssembledToolCall) => void;
   onToolResult: (call: AssembledToolCall) => void;
   onSessionIdle: () => void;
   onSessionError: (msg: string) => void;
+  // Catch-all — fires for EVERY event routed to this tracker, regardless of
+  // whether a specific handler exists. Lets the UI surface unhandled part
+  // types (subtask / file / step-start / step-finish / snapshot / patch /
+  // agent / retry / compaction), as well as todo.updated, file.edited,
+  // session.status, etc., without losing anything to the default branch.
+  onRawEvent: (evType: string, payload: unknown) => void;
 }
 
 export class SessionTracker {
@@ -50,9 +57,13 @@ export class SessionTracker {
   // Last text-part length keyed by partID — to derive a delta when only
   // .text full content is delivered (some opencode builds send no `delta`).
   private textLen = new Map<string, number>();
+  // Same trick for reasoning parts (model "thinking" stream).
+  private reasoningLen = new Map<string, number>();
   private toolCalls = new Map<string, AssembledToolCall>();
   // Final assembled assistant text, in part-ordinal order.
   private textParts = new Map<string, AssembledText>();
+  // Final assembled reasoning text, in part-ordinal order.
+  private reasoningParts = new Map<string, AssembledText>();
   private done = false;
   private endReason: EndReason | null = null;
   private endMessage = "";
@@ -87,6 +98,13 @@ export class SessionTracker {
       .join("");
   }
 
+  finalReasoning(): string {
+    return [...this.reasoningParts.values()]
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((p) => p.text)
+      .join("");
+  }
+
   markAbort(): void {
     if (this.done) return;
     this.done = true;
@@ -108,11 +126,27 @@ export class SessionTracker {
 
   handle(ev: Event): void {
     if (this.done) return;
+    // Surface every event to the bus FIRST so the UI can render even types
+    // we don't otherwise model. The specific switch below still runs and
+    // fires the structured callbacks (text/reasoning/tool/idle/error).
+    try {
+      const properties = (ev as { properties?: unknown }).properties;
+      this.cb.onRawEvent(ev.type, properties);
+    } catch {
+      // never let the raw firehose break the structured pipeline
+    }
     try {
       switch (ev.type) {
         case "message.part.updated": {
           const part = ev.properties.part;
-          if (part.messageID !== this.messageID) return;
+          // this.messageID is the id we generated client-side for the USER
+          // prompt; opencode echoes the user message back as a message.part
+          // with that id, and creates a SEPARATE server-generated message
+          // for the assistant reply. Skip our own user echo; accept every
+          // other part in this session (assistant + any subsequent steps).
+          // Dispatcher already filtered to this session via sessionID, so
+          // we won't see cross-session parts here.
+          if (part.messageID === this.messageID) return;
           const ordinal = this.ordinalFor(part.id);
           if (part.type === "text") {
             const prev = this.textLen.get(part.id) ?? 0;
@@ -127,6 +161,20 @@ export class SessionTracker {
             });
             if (delta.length > 0) {
               this.cb.onTokenDelta(part.id, ordinal, delta);
+            }
+          } else if (part.type === "reasoning") {
+            // Model "thinking" stream — same delta-or-diff dance as text.
+            const prev = this.reasoningLen.get(part.id) ?? 0;
+            const text = part.text ?? "";
+            const delta = ev.properties.delta ?? text.slice(prev);
+            this.reasoningLen.set(part.id, text.length);
+            this.reasoningParts.set(part.id, {
+              partID: part.id,
+              ordinal,
+              text,
+            });
+            if (delta.length > 0) {
+              this.cb.onReasoningDelta(part.id, ordinal, delta);
             }
           } else if (part.type === "tool") {
             const existing = this.toolCalls.get(part.callID);

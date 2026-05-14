@@ -67,6 +67,17 @@ export function makeAgentPrimitive(ctx: RunContext) {
             t: nowMs(),
           });
         },
+        onReasoningDelta: (partID, ordinal, delta) => {
+          ctx.bus.emit({
+            kind: "agent.reasoning",
+            runId: ctx.runId,
+            agentId,
+            partID,
+            ordinal,
+            delta,
+            t: nowMs(),
+          });
+        },
         onToolStart: (call) => {
           ctx.bus.emit({
             kind: "agent.tool.start",
@@ -90,6 +101,21 @@ export function makeAgentPrimitive(ctx: RunContext) {
             output: call.output,
             error: call.error,
             elapsedMs: (call.endMs ?? Date.now()) - call.startMs,
+            t: nowMs(),
+          });
+        },
+        onRawEvent: (evType, payload) => {
+          // Catch-all firehose so the UI never silently drops an event from
+          // opencode. Fires for EVERY event routed to this session — text,
+          // reasoning, tool, and the long tail (todo.updated, file.edited,
+          // session.status, step-start, step-finish, snapshot, patch, agent,
+          // retry, compaction, etc.).
+          ctx.bus.emit({
+            kind: "agent.raw",
+            runId: ctx.runId,
+            agentId,
+            evType,
+            payload,
             t: nowMs(),
           });
         },
@@ -125,6 +151,14 @@ export function makeAgentPrimitive(ctx: RunContext) {
         elapsedMs: r.elapsedMs,
         t: nowMs(),
       });
+      if ((r as { message?: string }).message) {
+        ctx.bus.emit({
+          kind: "workflow.log",
+          runId: ctx.runId,
+          msg: `agent() ${r.reason}: ${(r as { message?: string }).message}`,
+          t: nowMs(),
+        });
+      }
       return null;
     } catch (err) {
       // Contract: never throw. Any uncaught path resolves to null.

@@ -8,13 +8,22 @@ export interface AgentState {
   cwd: string;
   prompt: string;
   schemaHash?: string;
-  text: string; // accumulated tokens
+  text: string; // accumulated assistant text — replaced with canonical rawText on agent.end
+  rawText?: string; // canonical full assistant text from agent.end
+  reasoning: string; // accumulated model "thinking" deltas (opencode reasoning parts)
   toolCalls: ToolCallState[];
+  rawEvents: RawEventEntry[]; // every SSE event from opencode for this session, in arrival order
   status: "running" | "ok" | "fail" | "queued";
   reason?: string;
   startedAt: number;
   endedAt?: number;
   output?: unknown;
+}
+
+export interface RawEventEntry {
+  evType: string;
+  payload: unknown;
+  t: number;
 }
 
 export interface ToolCallState {
@@ -75,7 +84,9 @@ export const useRun = create<RunState>((set) => ({
           prompt: ev.prompt,
           schemaHash: ev.schemaHash,
           text: "",
+          reasoning: "",
           toolCalls: [],
+          rawEvents: [],
           status: "running",
           startedAt: ev.t,
         };
@@ -89,6 +100,22 @@ export const useRun = create<RunState>((set) => ({
         const a = s.agents[ev.agentId];
         if (!a) return s;
         return { ...s, agents: { ...s.agents, [ev.agentId]: { ...a, text: a.text + ev.delta } } };
+      }
+      case "agent.reasoning": {
+        const a = s.agents[ev.agentId];
+        if (!a) return s;
+        return { ...s, agents: { ...s.agents, [ev.agentId]: { ...a, reasoning: a.reasoning + ev.delta } } };
+      }
+      case "agent.raw": {
+        const a = s.agents[ev.agentId];
+        if (!a) return s;
+        // Cap per-agent ring at 2,000 entries — message.part.updated fires
+        // on every token tick and a 30-min run can produce hundreds of
+        // thousands of events; storing them all in zustand will OOM the tab.
+        const next = a.rawEvents.length >= 2000
+          ? [...a.rawEvents.slice(-1999), { evType: ev.evType, payload: ev.payload, t: ev.t }]
+          : [...a.rawEvents, { evType: ev.evType, payload: ev.payload, t: ev.t }];
+        return { ...s, agents: { ...s.agents, [ev.agentId]: { ...a, rawEvents: next } } };
       }
       case "agent.tool.start": {
         const a = s.agents[ev.agentId];
@@ -111,7 +138,27 @@ export const useRun = create<RunState>((set) => ({
       case "agent.end": {
         const a = s.agents[ev.agentId];
         if (!a) return s;
-        return { ...s, agents: { ...s.agents, [ev.agentId]: { ...a, status: ev.ok ? "ok" : "fail", reason: ev.reason, endedAt: ev.t, output: ev.output } } };
+        // Canonical full LLM text from the SessionTracker's finalText() —
+        // backfill the streamed `text` so the UI shows the complete output
+        // even if any deltas were dropped, and stash it separately for the
+        // transcript view.
+        const raw = ev.rawText;
+        const text = raw && raw.length > a.text.length ? raw : a.text;
+        return {
+          ...s,
+          agents: {
+            ...s.agents,
+            [ev.agentId]: {
+              ...a,
+              status: ev.ok ? "ok" : "fail",
+              reason: ev.reason,
+              endedAt: ev.t,
+              output: ev.output,
+              rawText: raw,
+              text,
+            },
+          },
+        };
       }
       default:
         return s;

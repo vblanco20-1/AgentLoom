@@ -16,16 +16,20 @@ cli
   .option("--cwd <path>", "Default cwd for agents lacking opts.cwd")
   .option("--log-level <l>", "trace|debug|info|warn|error", { default: "info" })
   .action(async (workflow: string, opts: Record<string, unknown>) => {
+    // CAC normalises kebab-case option names to camelCase, so read camelCase
+    // first and fall back to the dashed form for older CAC versions.
+    const getOpt = (camel: string, dashed: string) =>
+      (opts[camel] as string | undefined) ?? (opts[dashed] as string | undefined);
     const code = await runCli({
       workflowPath: workflow,
-      argsFile: opts["args-file"] as string | undefined,
-      argsJson: opts["args-json"] as string | undefined,
+      argsFile: getOpt("argsFile", "args-file"),
+      argsJson: getOpt("argsJson", "args-json"),
       config: opts.config as string | undefined,
-      webPort: Number(opts["web-port"]),
+      webPort: Number(getOpt("webPort", "web-port") ?? 7777),
       noOpen: opts.open === false,
-      runsDir: opts["runs-dir"] as string,
+      runsDir: getOpt("runsDir", "runs-dir") ?? ".runner/runs",
       cwd: opts.cwd as string | undefined,
-      logLevel: opts["log-level"] as string,
+      logLevel: getOpt("logLevel", "log-level") ?? "info",
     });
     process.exit(code);
   });
@@ -35,9 +39,15 @@ cli
   .option("--port <port>", "Listen port", { default: 7777 })
   .option("--runs-dir <path>", "Runs directory", { default: ".runner/runs" })
   .action(async (opts: Record<string, unknown>) => {
+    // CAC normalises kebab-case option names to camelCase on `opts`, so
+    // `--runs-dir` lands as opts.runsDir, not opts["runs-dir"]. Read both
+    // forms to be defensive across CAC versions.
+    const runsDir = (opts.runsDir as string | undefined)
+      ?? (opts["runs-dir"] as string | undefined)
+      ?? ".runner/runs";
     const code = await webCli({
-      port: Number(opts.port),
-      runsDir: opts["runs-dir"] as string,
+      port: Number(opts.port ?? 7777),
+      runsDir,
     });
     process.exit(code);
   });
@@ -48,11 +58,13 @@ cli
   .option("--runs-dir <path>", "Runs directory", { default: ".runner/runs" })
   .option("--speed <s>", "1x|2x|max", { default: "1x" })
   .action(async (runId: string, opts: Record<string, unknown>) => {
+    const get = (camel: string, dashed: string) =>
+      (opts[camel] as string | undefined) ?? (opts[dashed] as string | undefined);
     const code = await replayCli({
       runId,
-      webPort: Number(opts["web-port"]),
-      runsDir: opts["runs-dir"] as string,
-      speed: opts.speed as string,
+      webPort: Number(get("webPort", "web-port") ?? 7777),
+      runsDir: get("runsDir", "runs-dir") ?? ".runner/runs",
+      speed: (opts.speed as string | undefined) ?? "1x",
     });
     process.exit(code);
   });

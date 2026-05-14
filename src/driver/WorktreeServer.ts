@@ -1,4 +1,4 @@
-import { createOpencodeServer } from "@opencode-ai/sdk";
+import { createOpencodeServer, createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import type { Event } from "@opencode-ai/sdk";
 import { SessionTracker, type AssembledToolCall } from "./SessionTracker.ts";
 
@@ -14,6 +14,7 @@ export class WorktreeServer {
   readonly cwd: string;
   private url: string | null = null;
   private close: (() => void) | null = null;
+  private client: OpencodeClient | null = null;
   private trackersBySession = new Map<string, SessionTracker>();
   private trackersByMessage = new Map<string, SessionTracker>();
   private sseAbort: AbortController | null = null;
@@ -48,7 +49,10 @@ export class WorktreeServer {
         hostname: this.opts.hostname,
         port: 0,
         signal: ac.signal,
-        timeout: 0,
+        // SDK uses setTimeout(fn, timeout) literally, so passing 0 fires the
+        // timeout before opencode can boot. Use the configured bootTimeoutMs
+        // (still belt-and-suspendered by our own AbortController above).
+        timeout: this.opts.bootTimeoutMs,
         config: {
           ...(this.opts.extraConfig ?? {}),
           ...(this.opts.mcp ? { mcp: this.opts.mcp as Record<string, unknown> } : {}),
@@ -59,8 +63,11 @@ export class WorktreeServer {
     }
     this.url = server.url;
     this.close = server.close;
+    this.client = createOpencodeClient({ baseUrl: server.url });
     this.booted = true;
-    // Subscribe to SSE event stream.
+    // Subscribe to SSE event stream via the SDK (handles retry/backoff
+    // internally; the raw /event endpoint behavior changed in newer opencode
+    // versions — using the SDK client routes to /global/event correctly).
     this.startSse();
   }
 
@@ -70,55 +77,69 @@ export class WorktreeServer {
   }
 
   private async ssePumpLoop(signal: AbortSignal): Promise<void> {
+    // Defensive outer loop: if the SDK stream ever ends cleanly, give the
+    // server a moment to settle before resubscribing. Without this, a
+    // server-side close becomes a tight reconnect storm that blows up
+    // opencode's log file (we saw ~90 MB in 80s on the first bug encounter).
     while (!signal.aborted && this.booted) {
+      const startedAt = Date.now();
       try {
-        await this.ssePump(signal);
+        await this.ssePumpOnce(signal);
       } catch (err) {
         if (signal.aborted) return;
-        // brief backoff then reconnect
-        await new Promise((r) => setTimeout(r, 1000));
       }
+      if (signal.aborted) return;
+      const elapsed = Date.now() - startedAt;
+      const delay = elapsed < 250 ? 1000 : 250;
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
 
-  private async ssePump(signal: AbortSignal): Promise<void> {
-    const res = await fetch(`${this.baseUrl()}/event`, {
-      headers: { accept: "text/event-stream" },
+  private async ssePumpOnce(signal: AbortSignal): Promise<void> {
+    if (!this.client) throw new Error("WorktreeServer.client not initialized");
+    // IMPORTANT: this opencode build's /event endpoint only emits the
+    // server.connected welcome and immediately closes. The real LLM event
+    // stream lives at /global/event (verified by curl probe — yields
+    // message.part.delta, message.part.updated, session.idle, etc).
+    // The SDK's client.global.event() hits the right URL.
+    // Events on /global/event are wrapped in { directory, project, payload }
+    // — dispatchEvent unwraps .payload before routing to SessionTracker.
+    const result = await this.client.global.event({
       signal,
-    });
-    if (!res.ok || !res.body) {
-      throw new Error(`SSE subscribe failed: ${res.status}`);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (!signal.aborted) {
-      const { value, done } = await reader.read();
-      if (done) return;
-      buf += decoder.decode(value, { stream: true });
-      // SSE frames are separated by a blank line. Each frame has one or more
-      // "field: value" lines. We only care about the `data:` field.
-      let idx: number;
-      while ((idx = buf.indexOf("\n\n")) !== -1) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const dataLines = raw
-          .split("\n")
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trimStart());
-        if (dataLines.length === 0) continue;
-        const json = dataLines.join("\n");
+    } as unknown as Parameters<typeof this.client.global.event>[0]);
+    const stream = (result as { stream: AsyncGenerator<unknown> }).stream as AsyncGenerator<Event>;
+    try {
+      for await (const ev of stream) {
+        if (signal.aborted) return;
         try {
-          const ev = JSON.parse(json) as Event;
           this.dispatchEvent(ev);
         } catch {
-          // ignore unparseable frames
+          // dispatch failure must not kill the stream
         }
+      }
+    } finally {
+      // Best-effort early termination of the underlying response stream.
+      try {
+        await (stream as AsyncGenerator<Event>).return?.(undefined);
+      } catch {
+        // ignore
       }
     }
   }
 
-  private dispatchEvent(ev: Event): void {
+  private dispatchEvent(raw: unknown): void {
+    // /global/event events look like:
+    //   { directory, project, payload: { id, type, properties } }
+    // OR for sync-mirror events:
+    //   { directory, project, payload: { type: "sync", syncEvent: {...} } }
+    // Unwrap payload; ignore sync mirrors (they are duplicates of the real
+    // events that already passed through this dispatcher).
+    const wrapper = raw as { payload?: unknown };
+    const payload = wrapper && wrapper.payload != null ? wrapper.payload : raw;
+    const ev = payload as Event;
+    const evType = (ev as { type?: string }).type;
+    if (evType === "sync") return;
+
     // Route to the relevant tracker by sessionID first.
     const sessionID = extractSessionID(ev);
     if (sessionID) {
@@ -147,11 +168,24 @@ export class WorktreeServer {
   }
 
   async createSession(): Promise<string> {
-    const url = `${this.baseUrl()}/session?directory=${encodeURIComponent(this.cwd)}`;
-    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    if (!res.ok) throw new Error(`createSession ${res.status}: ${await res.text().catch(() => "")}`);
-    const body = (await res.json()) as { id: string };
-    return body.id;
+    if (!this.client) throw new Error("WorktreeServer.client not initialized");
+    const res = await this.client.session.create({
+      body: {},
+      query: { directory: this.cwd },
+    } as Parameters<OpencodeClient["session"]["create"]>[0]);
+    // The SDK's request helpers return `{ data, error, response }`. Extract
+    // session id regardless of which shape this version uses.
+    const data = (res as { data?: { id?: string }; error?: unknown }).data;
+    const error = (res as { error?: unknown }).error;
+    if (!data?.id) {
+      const msg = error
+        ? typeof error === "string"
+          ? error
+          : JSON.stringify(error)
+        : "createSession: missing data.id in SDK response";
+      throw new Error(`createSession: ${msg}`);
+    }
+    return data.id;
   }
 
   async sendPromptAsync(
@@ -164,28 +198,32 @@ export class WorktreeServer {
       text: string;
     },
   ): Promise<void> {
-    const url = `${this.baseUrl()}/session/${encodeURIComponent(sessionID)}/prompt_async?directory=${encodeURIComponent(this.cwd)}`;
-    const payload = {
-      messageID: body.messageID,
-      ...(body.model ? { model: body.model } : {}),
-      ...(body.agent ? { agent: body.agent } : {}),
-      ...(body.tools ? { tools: body.tools } : {}),
-      parts: [{ type: "text", text: body.text }],
-    };
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok && res.status !== 204) {
-      throw new Error(`prompt_async ${res.status}: ${await res.text().catch(() => "")}`);
+    if (!this.client) throw new Error("WorktreeServer.client not initialized");
+    const res = await this.client.session.promptAsync({
+      path: { id: sessionID },
+      query: { directory: this.cwd },
+      body: {
+        messageID: body.messageID,
+        ...(body.model ? { model: body.model } : {}),
+        ...(body.agent ? { agent: body.agent } : {}),
+        ...(body.tools ? { tools: body.tools } : {}),
+        parts: [{ type: "text", text: body.text }],
+      },
+    } as Parameters<OpencodeClient["session"]["promptAsync"]>[0]);
+    const error = (res as { error?: unknown }).error;
+    if (error) {
+      const msg = typeof error === "string" ? error : JSON.stringify(error);
+      throw new Error(`prompt_async: ${msg}`);
     }
   }
 
   async abortSession(sessionID: string): Promise<void> {
-    const url = `${this.baseUrl()}/session/${encodeURIComponent(sessionID)}/abort?directory=${encodeURIComponent(this.cwd)}`;
+    if (!this.client) return;
     try {
-      await fetch(url, { method: "DELETE" });
+      await this.client.session.abort({
+        path: { id: sessionID },
+        query: { directory: this.cwd },
+      } as Parameters<OpencodeClient["session"]["abort"]>[0]);
     } catch {
       // best-effort
     }
@@ -193,8 +231,15 @@ export class WorktreeServer {
 
   shutdown(): void {
     if (this.sseAbort) this.sseAbort.abort();
-    if (this.close) this.close();
+    if (this.close) {
+      try {
+        this.close();
+      } catch {
+        // ignore
+      }
+    }
     this.booted = false;
+    this.client = null;
   }
 }
 

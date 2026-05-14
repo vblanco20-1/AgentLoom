@@ -7,7 +7,14 @@ UI streaming every running agent's tokens and tool calls.
 
 ## Status
 
-Pre-release. v0.1 — see `IMPLEMENTATION_STATUS.md` for the milestone matrix.
+Pre-release. v0.1 — see [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) for the milestone matrix.
+
+## Documentation
+
+- **[`docs/MANUAL.md`](docs/MANUAL.md)** — full user-facing manual: API
+  reference, CLI, configuration, web UI, persistence, architecture,
+  troubleshooting, extending, security.
+- [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) — milestone state.
 
 ## Quick start
 

@@ -20,8 +20,10 @@ export type RunnerEvent =
   | { kind: "agent.start"; runId: string; agentId: string; label?: string; phase?: string; cwd: string; prompt: string; schemaHash?: string; t: number }
   | { kind: "agent.session"; runId: string; agentId: string; sessionID: string; messageID: string; t: number }
   | { kind: "agent.token"; runId: string; agentId: string; partID: string; ordinal: number; delta: string; t: number }
+  | { kind: "agent.reasoning"; runId: string; agentId: string; partID: string; ordinal: number; delta: string; t: number }
   | { kind: "agent.tool.start"; runId: string; agentId: string; callID: string; ordinal: number; tool: string; input: unknown; t: number }
   | { kind: "agent.tool.result"; runId: string; agentId: string; callID: string; tool: string; status: ToolStatus; output?: string; error?: string; elapsedMs: number; t: number }
+  | { kind: "agent.raw"; runId: string; agentId: string; evType: string; payload: unknown; t: number }
   | { kind: "agent.end"; runId: string; agentId: string; ok: boolean; reason: AgentEndReason; output?: unknown; rawText?: string; elapsedMs: number; t: number };
 
 export interface RunIndexEntry {

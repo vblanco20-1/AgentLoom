@@ -43,9 +43,33 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const runId = uuid();
   const bus = new EventBus();
 
-  // Stdout logger for headless visibility.
+  // Stdout logger for headless visibility — full machine-readable JSON so
+  // pipelines can `| jq`. Stderr gets a human-readable summary at agent.end
+  // showing the full assistant text (LLM output), since the JSON-dumped
+  // agent.tool.result events tend to dominate the stream and the actual
+  // model reply is otherwise easy to miss.
+  const labels = new Map<string, string>();
+  const reasoningBuf = new Map<string, string>();
   bus.on((ev) => {
     process.stdout.write(JSON.stringify(ev) + "\n");
+    if (ev.kind === "agent.start") {
+      labels.set(ev.agentId, ev.label ?? ev.agentId.slice(0, 8));
+      reasoningBuf.set(ev.agentId, "");
+    } else if (ev.kind === "agent.reasoning") {
+      reasoningBuf.set(ev.agentId, (reasoningBuf.get(ev.agentId) ?? "") + ev.delta);
+    } else if (ev.kind === "agent.end") {
+      const tag = labels.get(ev.agentId) ?? ev.agentId.slice(0, 8);
+      const status = ev.ok ? "ok" : ev.reason ?? "fail";
+      const elapsed = `${(ev.elapsedMs / 1000).toFixed(1)}s`;
+      const raw = (ev.rawText ?? "").trim();
+      const reasoning = (reasoningBuf.get(ev.agentId) ?? "").trim();
+      reasoningBuf.delete(ev.agentId);
+      const header = `\n── agent ${tag} [${status}] ${elapsed} ─────────────────────────`;
+      const reasoningBlock = reasoning.length > 0
+        ? `\n[thinking]\n${reasoning}\n`
+        : "";
+      process.stderr.write(`${header}${reasoningBlock}\n${raw.length > 0 ? raw : "(no assistant text)"}\n`);
+    }
   });
 
   const store = new RunStore(cfg.runsDir, runId);
@@ -91,16 +115,42 @@ export async function runCli(opts: RunOptions): Promise<number> {
     t: nowMs(),
   });
 
-  // Wire SIGINT to abort all in-flight agents + shutdown.
+  // Wire SIGINT / SIGTERM / fatal exit to abort in-flight agents AND tear
+  // down the opencode child processes. Without driver.shutdown() here, a
+  // killed bun parent leaves orphan opencode.exe processes (cross-spawn'd
+  // by the SDK) holding file handles to opencode.db and logs.
   let interrupted = false;
-  const onInterrupt = () => {
+  const teardown = async (sig: string) => {
     if (interrupted) return;
     interrupted = true;
-    process.stderr.write("\nagent-runner: SIGINT — aborting in-flight agents…\n");
-    for (const ab of ctx.activeAborts) void ab();
+    process.stderr.write(`\nagent-runner: ${sig} — aborting agents + shutting down opencode…\n`);
+    for (const ab of ctx.activeAborts) {
+      try {
+        await ab();
+      } catch {
+        // best effort
+      }
+    }
+    try {
+      await driver.shutdown();
+    } catch {
+      // best effort
+    }
+    if (httpServer) {
+      try { httpServer.close(); } catch { /* ignore */ }
+    }
+    try { await store.close(); } catch { /* ignore */ }
+    // 130 is the conventional exit code for SIGINT.
+    process.exit(sig === "SIGINT" ? 130 : 143);
   };
-  process.on("SIGINT", onInterrupt);
-  process.on("SIGTERM", onInterrupt);
+  const onInterrupt = () => { void teardown("SIGINT"); };
+  const onTerm      = () => { void teardown("SIGTERM"); };
+  // process.on("exit") fires for plain process.exit() too; can't be async
+  // there, so we do a best-effort sync shutdown via SIGINT-style teardown
+  // earlier in the handler chain. The two signal handlers above are the
+  // primary cleanup path.
+  process.on("SIGINT",  onInterrupt);
+  process.on("SIGTERM", onTerm);
 
   const res = await runWorkflow(wf, {
     agent: agent as unknown as (prompt: string, opts?: unknown) => Promise<unknown>,
@@ -141,8 +191,8 @@ export async function runCli(opts: RunOptions): Promise<number> {
     // Default: close after run so the CLI exits cleanly.
   }
   if (httpServer) httpServer.close();
-  process.off("SIGINT", onInterrupt);
-  process.off("SIGTERM", onInterrupt);
+  process.off("SIGINT",  onInterrupt);
+  process.off("SIGTERM", onTerm);
 
   return res.ok ? 0 : 1;
 }

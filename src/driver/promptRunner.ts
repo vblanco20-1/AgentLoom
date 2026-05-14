@@ -15,8 +15,10 @@ export interface PromptRequest {
   // the bus-level events; this layer is purely the per-call mechanics.
   onSessionAssigned: (sessionID: string, messageID: string) => void;
   onTokenDelta: (partID: string, ordinal: number, delta: string) => void;
+  onReasoningDelta: (partID: string, ordinal: number, delta: string) => void;
   onToolStart: (call: import("./SessionTracker.ts").AssembledToolCall) => void;
   onToolResult: (call: import("./SessionTracker.ts").AssembledToolCall) => void;
+  onRawEvent: (evType: string, payload: unknown) => void;
 }
 
 export type PromptResult =
@@ -39,7 +41,9 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
     const fullPrompt = req.schema
       ? `${req.prompt}\n${describeSchemaForPrompt(req.schema)}`
       : req.prompt;
-    const messageID = uuid();
+    // opencode's prompt_async API requires messageID to start with "msg"
+    // (validation error: "Expected a string starting with \"msg\"").
+    const messageID = `msg_${uuid().replace(/-/g, "")}`;
     try {
       sessionID = await server.createSession();
     } catch (err) {
@@ -56,8 +60,10 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
     const idleP = new Promise<void>((resolve) => {
       tracker = new SessionTracker(sessionID!, messageID, {
         onTokenDelta: req.onTokenDelta,
+        onReasoningDelta: req.onReasoningDelta,
         onToolStart: req.onToolStart,
         onToolResult: req.onToolResult,
+        onRawEvent: req.onRawEvent,
         onSessionIdle: () => resolve(),
         onSessionError: () => resolve(),
       });

@@ -29,6 +29,17 @@ const STATIC_INDEX_HTML = `<!doctype html>
     .status.running { background: #5a4400; color: #ffdf6f; }
     .status.ok { background: #224d22; color: #94f094; }
     .status.fail { background: #4d2222; color: #f09494; }
+    .reasoning { margin: 6px 0; font-size: 12px; }
+    .reasoning summary { cursor: pointer; color: #b6a4ff; padding: 2px 0; }
+    .reasoning pre { background: #0c0c10; padding: 6px 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; color: #b6a4ff; opacity: 0.85; margin: 4px 0 0; }
+    .raw-events { margin: 6px 0; font-size: 12px; }
+    .raw-events summary { cursor: pointer; color: #9ec5ff; padding: 2px 0; }
+    .raw-events .raw-list { background: #0c0c10; border: 1px solid #292932; border-radius: 4px; max-height: 220px; overflow-y: auto; margin-top: 4px; }
+    .raw-events .raw-row { border-bottom: 1px solid #1a1c26; padding: 4px 8px; cursor: pointer; }
+    .raw-events .raw-row .raw-type { color: #9ec5ff; font-family: ui-monospace, SF Mono, Menlo, monospace; }
+    .raw-events .raw-row .raw-time { opacity: 0.5; font-family: ui-monospace, SF Mono, Menlo, monospace; margin-right: 8px; }
+    .raw-events .raw-row pre { background: #000; padding: 6px; border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; margin: 4px 0 0; display: none; }
+    .raw-events .raw-row.open pre { display: block; }
     .tools { margin-top: 8px; font-size: 12px; color: #aaa; }
     .tool { background: #1a1c26; border-left: 3px solid #555; padding: 4px 8px; margin: 4px 0; border-radius: 0 4px 4px 0; }
     .tool.completed { border-left-color: #4ecb71; }
@@ -149,20 +160,45 @@ function handle(ev) {
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = (ev.phase ? "[" + ev.phase + "] " : "") + ev.cwd;
+    const reasoning = document.createElement("details");
+    reasoning.className = "reasoning";
+    reasoning.style.display = "none";
+    const reasoningSummary = document.createElement("summary");
+    reasoningSummary.textContent = "thinking";
+    const reasoningPre = document.createElement("pre");
+    reasoning.append(reasoningSummary, reasoningPre);
     const pre = document.createElement("pre");
     pre.dataset.role = "stream";
     const tools = document.createElement("div");
     tools.className = "tools";
     tools.dataset.role = "tools";
-    card.append(head, meta, pre, tools);
+    const rawDetails = document.createElement("details");
+    rawDetails.className = "raw-events";
+    const rawSummary = document.createElement("summary");
+    rawSummary.textContent = "raw events (0)";
+    const rawList = document.createElement("div");
+    rawList.className = "raw-list";
+    rawDetails.append(rawSummary, rawList);
+    card.append(head, meta, reasoning, pre, tools, rawDetails);
     grid.appendChild(card);
-    agents.set(ev.agentId, { card, status, pre, tools });
+    agents.set(ev.agentId, { card, status, pre, tools, reasoning, reasoningPre, reasoningSummary, rawDetails, rawSummary, rawList, rawCount: 0 });
   } else if (ev.kind === "agent.token") {
     const a = agents.get(ev.agentId);
     if (a) {
       a.pre.textContent += ev.delta;
       a.pre.scrollTop = a.pre.scrollHeight;
     }
+  } else if (ev.kind === "agent.reasoning") {
+    const a = agents.get(ev.agentId);
+    if (a) {
+      a.reasoning.style.display = "block";
+      a.reasoningPre.textContent += ev.delta;
+      a.reasoningPre.scrollTop = a.reasoningPre.scrollHeight;
+      a.reasoningSummary.textContent = "thinking (" + a.reasoningPre.textContent.length.toLocaleString() + " chars)";
+    }
+  } else if (ev.kind === "agent.raw") {
+    const a = agents.get(ev.agentId);
+    if (a) appendRawEvent(a, ev);
   } else if (ev.kind === "agent.tool.start") {
     const a = agents.get(ev.agentId);
     if (!a) return;
@@ -182,12 +218,47 @@ function handle(ev) {
     if (a) {
       a.status.textContent = ev.ok ? "ok" : (ev.reason || "fail");
       a.status.className = "status " + (ev.ok ? "ok" : "fail");
+      // Backfill the streamed pre with the canonical full LLM output —
+      // this is the assembled assistant text from every text part, even
+      // if individual stream deltas were dropped. Tool inputs/outputs
+      // remain in the dedicated tool list below.
+      if (ev.rawText && ev.rawText.length > a.pre.textContent.length) {
+        a.pre.textContent = ev.rawText;
+        a.pre.scrollTop = a.pre.scrollHeight;
+      }
     }
   } else if (ev.kind === "workflow.end") {
     runTitle.textContent += ev.ok ? "  •  ok" : "  •  FAILED";
   } else if (ev.kind === "workflow.log") {
     console.log("[log]", ev.msg, ev.meta);
   }
+}
+
+function appendRawEvent(a, ev) {
+  // Cap at 2,000 entries to keep the DOM bounded — long runs can produce
+  // hundreds of thousands of message.part.updated ticks.
+  if (a.rawList.children.length >= 2000) {
+    a.rawList.removeChild(a.rawList.firstChild);
+  }
+  const row = document.createElement("div");
+  row.className = "raw-row";
+  const time = new Date(ev.t).toISOString().slice(11, 23);
+  const timeEl = document.createElement("span");
+  timeEl.className = "raw-time";
+  timeEl.textContent = time;
+  const typeEl = document.createElement("span");
+  typeEl.className = "raw-type";
+  typeEl.textContent = ev.evType;
+  const head = document.createElement("div");
+  head.append(timeEl, typeEl);
+  const pre = document.createElement("pre");
+  try { pre.textContent = JSON.stringify(ev.payload, null, 2); }
+  catch (e) { pre.textContent = String(ev.payload); }
+  row.append(head, pre);
+  row.addEventListener("click", () => row.classList.toggle("open"));
+  a.rawList.appendChild(row);
+  a.rawCount += 1;
+  a.rawSummary.textContent = "raw events (" + a.rawCount.toLocaleString() + ")";
 }
 `;
 

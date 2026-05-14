@@ -3,6 +3,7 @@ import { useRun } from "../store/runStore";
 import { TokenStream } from "./TokenStream";
 import { ToolCallList } from "./ToolCallList";
 import { SchemaBadge } from "./SchemaBadge";
+import { RawEventLog } from "./RawEventLog";
 
 export function AgentCard({ agentId, runId }: { agentId: string; runId: string }) {
   const a = useRun((s) => s.agents[agentId]);
@@ -37,8 +38,30 @@ export function AgentCard({ agentId, runId }: { agentId: string; runId: string }
         {a.phase && <span style={{ marginRight: 8 }}>[{a.phase}]</span>}
         <span title={a.cwd}>{shorten(a.cwd, 50)}</span>
       </div>
-      <TokenStream text={a.text} />
+      {a.reasoning && (
+        <details style={{ margin: "0 0 8px", fontSize: 12 }}>
+          <summary style={{ cursor: "pointer", color: "#b6a4ff", padding: "4px 0" }}>
+            thinking ({a.reasoning.length.toLocaleString()} chars)
+          </summary>
+          <pre style={{
+            background: "#0c0c10",
+            padding: 8,
+            borderRadius: 4,
+            maxHeight: 200,
+            overflowY: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            color: "#b6a4ff",
+            margin: "4px 0 0",
+            opacity: 0.85,
+          }}>
+            {a.reasoning}
+          </pre>
+        </details>
+      )}
+      <TokenStream text={a.rawText ?? a.text} />
       <ToolCallList calls={a.toolCalls} />
+      <RawEventLog events={a.rawEvents} maxHeight={220} />
     </div>
   );
 }
