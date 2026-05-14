@@ -1,0 +1,32 @@
+{
+  "name": "agent-runner",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "bin": {
+    "agent-runner": "bin/agent-runner"
+  },
+  "scripts": {
+    "build": "bun build src/cli/index.ts --target=bun --outdir=dist/cli --format=esm",
+    "build:web": "cd web && bun install && bun run build",
+    "build:all": "bun run build && bun run build:web",
+    "build:compile": "bun build src/cli/index.ts --target=bun --compile --outfile=dist/agent-runner",
+    "dev": "bun run src/cli/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.14.28",
+    "@babel/parser": "^7.25.0",
+    "ajv": "^8.17.1",
+    "cac": "^6.7.14"
+  },
+  "devDependencies": {
+    "@types/babel__parser": "^7.1.1",
+    "@types/bun": "latest",
+    "typescript": "^5.4.0"
+  }
+}

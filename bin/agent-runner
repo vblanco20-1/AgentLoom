@@ -1,0 +1,12 @@
+#!/usr/bin/env bun
+// Bootstrap: prefer compiled dist if present, else run from source.
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const distPath = resolve(here, "../dist/cli/index.js");
+const srcPath = resolve(here, "../src/cli/index.ts");
+
+const entry = existsSync(distPath) ? distPath : srcPath;
+await import(entry);

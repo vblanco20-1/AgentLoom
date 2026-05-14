@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.runner/
+*.log
+.env
+.env.local
+bun.lockb
+
+# Web build artifacts
+web/dist/
+web/node_modules/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
