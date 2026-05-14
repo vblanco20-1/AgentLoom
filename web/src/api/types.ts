@@ -24,6 +24,7 @@ export type RunnerEvent =
   | { kind: "agent.tool.start"; runId: string; agentId: string; callID: string; ordinal: number; tool: string; input: unknown; t: number }
   | { kind: "agent.tool.result"; runId: string; agentId: string; callID: string; tool: string; status: ToolStatus; output?: string; error?: string; elapsedMs: number; t: number }
   | { kind: "agent.raw"; runId: string; agentId: string; evType: string; payload: unknown; t: number }
+  | { kind: "agent.schemaRetry"; runId: string; agentId: string; attempt: number; maxRetries: number; error: string; t: number }
   | { kind: "agent.end"; runId: string; agentId: string; ok: boolean; reason: AgentEndReason; output?: unknown; rawText?: string; elapsedMs: number; t: number };
 
 export interface RunIndexEntry {

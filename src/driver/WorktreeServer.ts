@@ -1,5 +1,9 @@
-import { createOpencodeServer, createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
-import type { Event } from "@opencode-ai/sdk";
+import {
+  createOpencodeServer,
+  createOpencodeClient,
+  type OpencodeClient,
+} from "@opencode-ai/sdk/v2";
+import type { Event } from "@opencode-ai/sdk/v2";
 import { SessionTracker, type AssembledToolCall } from "./SessionTracker.ts";
 
 export interface WorktreeServerOptions {
@@ -14,6 +18,9 @@ export class WorktreeServer {
   readonly cwd: string;
   private url: string | null = null;
   private close: (() => void) | null = null;
+  // We use the v2 SDK for everything: it ships native typed `format`
+  // support on prompt_async (json_schema enforcement) and a v2 Event union
+  // that includes message.part.delta — no more pretending v1 has it.
   private client: OpencodeClient | null = null;
   private trackersBySession = new Map<string, SessionTracker>();
   private trackersByMessage = new Map<string, SessionTracker>();
@@ -97,16 +104,15 @@ export class WorktreeServer {
 
   private async ssePumpOnce(signal: AbortSignal): Promise<void> {
     if (!this.client) throw new Error("WorktreeServer.client not initialized");
-    // IMPORTANT: this opencode build's /event endpoint only emits the
-    // server.connected welcome and immediately closes. The real LLM event
-    // stream lives at /global/event (verified by curl probe — yields
-    // message.part.delta, message.part.updated, session.idle, etc).
-    // The SDK's client.global.event() hits the right URL.
+    // IMPORTANT: opencode's /event endpoint only emits the server.connected
+    // welcome and immediately closes. The real LLM event stream lives at
+    // /global/event (yields message.part.delta, message.part.updated,
+    // session.idle, etc). The v2 SDK's client.global.event() hits the right
+    // URL; v2's client.event.subscribe() hits the wrong (welcome-only) one
+    // and must not be used here.
     // Events on /global/event are wrapped in { directory, project, payload }
     // — dispatchEvent unwraps .payload before routing to SessionTracker.
-    const result = await this.client.global.event({
-      signal,
-    } as unknown as Parameters<typeof this.client.global.event>[0]);
+    const result = await this.client.global.event({ signal });
     const stream = (result as { stream: AsyncGenerator<unknown> }).stream as AsyncGenerator<Event>;
     try {
       for await (const ev of stream) {
@@ -169,12 +175,8 @@ export class WorktreeServer {
 
   async createSession(): Promise<string> {
     if (!this.client) throw new Error("WorktreeServer.client not initialized");
-    const res = await this.client.session.create({
-      body: {},
-      query: { directory: this.cwd },
-    } as Parameters<OpencodeClient["session"]["create"]>[0]);
-    // The SDK's request helpers return `{ data, error, response }`. Extract
-    // session id regardless of which shape this version uses.
+    const res = await this.client.session.create({ directory: this.cwd });
+    // The SDK's request helpers return `{ data, error, response }`.
     const data = (res as { data?: { id?: string }; error?: unknown }).data;
     const error = (res as { error?: unknown }).error;
     if (!data?.id) {
@@ -196,20 +198,38 @@ export class WorktreeServer {
       agent?: string;
       tools?: Record<string, boolean>;
       text: string;
+      // Schema to enforce server-side via opencode's structured-output mode.
+      // When provided, opencode 1.14+ binds the model's native JSON mode (or
+      // re-prompts up to retryCount times if the response misses the schema)
+      // — drastically more reliable than relying on the model to read our
+      // describeSchemaForPrompt block.
+      schema?: Record<string, unknown>;
+      schemaRetryCount?: number;
     },
   ): Promise<void> {
     if (!this.client) throw new Error("WorktreeServer.client not initialized");
-    const res = await this.client.session.promptAsync({
-      path: { id: sessionID },
-      query: { directory: this.cwd },
-      body: {
-        messageID: body.messageID,
-        ...(body.model ? { model: body.model } : {}),
-        ...(body.agent ? { agent: body.agent } : {}),
-        ...(body.tools ? { tools: body.tools } : {}),
-        parts: [{ type: "text", text: body.text }],
-      },
-    } as Parameters<OpencodeClient["session"]["promptAsync"]>[0]);
+    // v2's promptAsync takes a flat params object. `format: OutputFormat`
+    // binds opencode's native structured-output enforcement: the model is
+    // constrained to a JSON object matching `schema`, and opencode re-prompts
+    // up to retryCount times if a reply violates it before surfacing the
+    // error.
+    const params: Parameters<OpencodeClient["session"]["promptAsync"]>[0] = {
+      sessionID,
+      directory: this.cwd,
+      messageID: body.messageID,
+      parts: [{ type: "text", text: body.text }],
+    };
+    if (body.model) params.model = body.model;
+    if (body.agent) params.agent = body.agent;
+    if (body.tools) params.tools = body.tools;
+    if (body.schema) {
+      params.format = {
+        type: "json_schema",
+        schema: body.schema,
+        retryCount: body.schemaRetryCount ?? 2,
+      };
+    }
+    const res = await this.client.session.promptAsync(params);
     const error = (res as { error?: unknown }).error;
     if (error) {
       const msg = typeof error === "string" ? error : JSON.stringify(error);
@@ -220,10 +240,7 @@ export class WorktreeServer {
   async abortSession(sessionID: string): Promise<void> {
     if (!this.client) return;
     try {
-      await this.client.session.abort({
-        path: { id: sessionID },
-        query: { directory: this.cwd },
-      } as Parameters<OpencodeClient["session"]["abort"]>[0]);
+      await this.client.session.abort({ sessionID, directory: this.cwd });
     } catch {
       // best-effort
     }

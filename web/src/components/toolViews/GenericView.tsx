@@ -1,9 +1,11 @@
 import { useState } from "react";
 import type { ToolCallState } from "../../store/runStore";
+import { useStickyScroll } from "../../lib/useStickyScroll";
 
 export function GenericView({ call }: { call: ToolCallState }) {
   const [open, setOpen] = useState(false);
   const borderColor = call.status === "completed" ? "#4ecb71" : call.status === "error" ? "#cb4e4e" : "#666";
+  const outRef = useStickyScroll<HTMLPreElement>(call.output?.length ?? 0);
   return (
     <div style={{
       borderLeft: `3px solid ${borderColor}`,
@@ -24,7 +26,7 @@ export function GenericView({ call }: { call: ToolCallState }) {
         <>
           <pre style={{ color: "#888", whiteSpace: "pre-wrap", maxHeight: 100, overflowY: "auto" }}>{JSON.stringify(call.input, null, 2)}</pre>
           {call.output && (
-            <pre style={{ color: "#9ef0aa", margin: "4px 0", whiteSpace: "pre-wrap", maxHeight: 100, overflowY: "auto" }}>{call.output.slice(0, 2000)}</pre>
+            <pre ref={outRef} style={{ color: "#9ef0aa", margin: "4px 0", whiteSpace: "pre-wrap", maxHeight: 100, overflowY: "auto" }}>{call.output.slice(0, 2000)}</pre>
           )}
           {call.error && <pre style={{ color: "#f09494", margin: "4px 0" }}>{call.error}</pre>}
         </>

@@ -2,7 +2,7 @@
 // One tracker is created per agent() call, registered with the WorktreeServer
 // under both sessionID and messageID for routing.
 
-import type { Event } from "@opencode-ai/sdk";
+import type { Event } from "@opencode-ai/sdk/v2";
 
 export type EndReason =
   | "idle"        // EventSessionIdle reached
@@ -54,16 +54,31 @@ export class SessionTracker {
   readonly messageID: string;
   private partOrdinal = 0;
   private partOrdinals = new Map<string, number>();
-  // Last text-part length keyed by partID — to derive a delta when only
-  // .text full content is delivered (some opencode builds send no `delta`).
+  // Emitted-so-far length keyed by partID — the streaming counter we use to
+  // dedupe between message.part.delta (incremental) and message.part.updated
+  // (snapshot of full text). When a snapshot arrives, anything beyond
+  // textLen[partID] is the new tail to emit; everything before was already
+  // streamed via deltas. Same trick for reasoning.
   private textLen = new Map<string, number>();
-  // Same trick for reasoning parts (model "thinking" stream).
   private reasoningLen = new Map<string, number>();
   private toolCalls = new Map<string, AssembledToolCall>();
   // Final assembled assistant text, in part-ordinal order.
   private textParts = new Map<string, AssembledText>();
   // Final assembled reasoning text, in part-ordinal order.
   private reasoningParts = new Map<string, AssembledText>();
+  // Once we've seen a message.part.updated for a partID we know its kind
+  // ("text" vs "reasoning"). message.part.delta carries the partID but its
+  // `field` doesn't disambiguate (both TextPart and ReasoningPart stream
+  // into a field called "text"). So we use this map to route the delta.
+  private partKinds = new Map<string, "text" | "reasoning">();
+  // Deltas that arrived before we knew the part's kind — opencode often
+  // emits message.part.delta tokens before the first message.part.updated
+  // snapshot for that partID. Buffer them in arrival order and flush on the
+  // first matching .updated event.
+  private pendingDeltas = new Map<string, string[]>();
+  // partIDs that belong to the user-prompt echo, so we keep skipping their
+  // deltas after the initial .updated tagged them.
+  private userEchoParts = new Set<string>();
   private done = false;
   private endReason: EndReason | null = null;
   private endMessage = "";
@@ -135,6 +150,20 @@ export class SessionTracker {
     } catch {
       // never let the raw firehose break the structured pipeline
     }
+    // opencode v2 emits message.part.delta as the primary streaming token
+    // event — often BEFORE the first message.part.updated snapshot for the
+    // same partID arrives. The SDK v1 Event union doesn't list this type, so
+    // we branch on the raw string before entering the typed switch. Three
+    // cases:
+    //   1. partID already known to be the user echo → drop.
+    //   2. kind ("text" | "reasoning") known from a prior .updated → route now.
+    //   3. kind unknown → buffer; first matching .updated flushes via
+    //      flushPendingForText/Reasoning before processing the snapshot.
+    const evType = (ev as { type?: string }).type;
+    if (evType === "message.part.delta") {
+      this.handlePartDelta(ev as unknown as { properties: { sessionID?: string; messageID?: string; partID?: string; field?: string; delta?: string } });
+      return;
+    }
     try {
       switch (ev.type) {
         case "message.part.updated": {
@@ -146,35 +175,48 @@ export class SessionTracker {
           // other part in this session (assistant + any subsequent steps).
           // Dispatcher already filtered to this session via sessionID, so
           // we won't see cross-session parts here.
-          if (part.messageID === this.messageID) return;
+          if (part.messageID === this.messageID) {
+            this.userEchoParts.add(part.id);
+            // Drop any deltas we'd buffered for this part before we knew it
+            // was the user echo — they would re-emit the user prompt as
+            // assistant tokens.
+            this.pendingDeltas.delete(part.id);
+            return;
+          }
           const ordinal = this.ordinalFor(part.id);
           if (part.type === "text") {
+            this.partKinds.set(part.id, "text");
+            this.flushPendingForText(part.id, ordinal);
             const prev = this.textLen.get(part.id) ?? 0;
             const text = part.text ?? "";
-            // Prefer SDK-supplied delta when present; else compute it.
-            const delta = ev.properties.delta ?? text.slice(prev);
+            // Compute the tail beyond what we already streamed. Anything up
+            // to `prev` was already emitted (via prior .delta tokens or an
+            // earlier snapshot); the slice after is the new tail.
+            const tail = text.slice(prev);
             this.textLen.set(part.id, text.length);
             this.textParts.set(part.id, {
               partID: part.id,
               ordinal,
               text,
             });
-            if (delta.length > 0) {
-              this.cb.onTokenDelta(part.id, ordinal, delta);
+            if (tail.length > 0) {
+              this.cb.onTokenDelta(part.id, ordinal, tail);
             }
           } else if (part.type === "reasoning") {
-            // Model "thinking" stream — same delta-or-diff dance as text.
+            // Model "thinking" stream — same flush-then-tail dance as text.
+            this.partKinds.set(part.id, "reasoning");
+            this.flushPendingForReasoning(part.id, ordinal);
             const prev = this.reasoningLen.get(part.id) ?? 0;
             const text = part.text ?? "";
-            const delta = ev.properties.delta ?? text.slice(prev);
+            const tail = text.slice(prev);
             this.reasoningLen.set(part.id, text.length);
             this.reasoningParts.set(part.id, {
               partID: part.id,
               ordinal,
               text,
             });
-            if (delta.length > 0) {
-              this.cb.onReasoningDelta(part.id, ordinal, delta);
+            if (tail.length > 0) {
+              this.cb.onReasoningDelta(part.id, ordinal, tail);
             }
           } else if (part.type === "tool") {
             const existing = this.toolCalls.get(part.callID);
@@ -222,6 +264,13 @@ export class SessionTracker {
         }
         case "session.idle": {
           if (ev.properties.sessionID !== this.sessionID) return;
+          // Last-chance flush: if opencode streamed text via message.part.delta
+          // and never followed up with a message.part.updated snapshot, the
+          // buffered deltas would otherwise vanish — leaving finalText()
+          // empty and breaking JSON-schema validation on the runner side.
+          // Treat any leftover pending parts as text (the dominant case);
+          // reasoning-only parts without a snapshot are uncommon.
+          this.flushAllPendingAsText();
           this.done = true;
           this.endReason = "idle";
           this.cb.onSessionIdle();
@@ -260,5 +309,80 @@ export class SessionTracker {
       this.partOrdinals.set(partID, o);
     }
     return o;
+  }
+
+  private handlePartDelta(ev: { properties: { sessionID?: string; messageID?: string; partID?: string; field?: string; delta?: string } }): void {
+    const p = ev.properties;
+    if (!p.partID) return;
+    if (p.messageID && p.messageID === this.messageID) {
+      this.userEchoParts.add(p.partID);
+      this.pendingDeltas.delete(p.partID);
+      return;
+    }
+    if (this.userEchoParts.has(p.partID)) return;
+    const delta = p.delta ?? "";
+    if (delta.length === 0) return;
+    const kind = this.partKinds.get(p.partID);
+    if (kind === "text") {
+      this.appendTextDelta(p.partID, delta);
+    } else if (kind === "reasoning") {
+      this.appendReasoningDelta(p.partID, delta);
+    } else {
+      let buf = this.pendingDeltas.get(p.partID);
+      if (!buf) { buf = []; this.pendingDeltas.set(p.partID, buf); }
+      buf.push(delta);
+    }
+  }
+
+  // Append a text delta to the partID's internal buffer, advance textLen, and
+  // notify the consumer. Used by both message.part.delta (streaming tokens)
+  // and the flush path after a .updated tags the partID's kind.
+  private appendTextDelta(partID: string, delta: string): void {
+    const ordinal = this.ordinalFor(partID);
+    const prev = this.textParts.get(partID);
+    const text = (prev?.text ?? "") + delta;
+    this.textParts.set(partID, { partID, ordinal, text });
+    this.textLen.set(partID, text.length);
+    this.cb.onTokenDelta(partID, ordinal, delta);
+  }
+
+  private appendReasoningDelta(partID: string, delta: string): void {
+    const ordinal = this.ordinalFor(partID);
+    const prev = this.reasoningParts.get(partID);
+    const text = (prev?.text ?? "") + delta;
+    this.reasoningParts.set(partID, { partID, ordinal, text });
+    this.reasoningLen.set(partID, text.length);
+    this.cb.onReasoningDelta(partID, ordinal, delta);
+  }
+
+  // Replay any deltas we buffered before the first .updated told us this
+  // partID was a text part. Re-uses appendTextDelta so the internal
+  // accumulators and the consumer callback both stay consistent.
+  private flushPendingForText(partID: string, _ordinal: number): void {
+    const buf = this.pendingDeltas.get(partID);
+    if (!buf || buf.length === 0) return;
+    this.pendingDeltas.delete(partID);
+    for (const d of buf) this.appendTextDelta(partID, d);
+  }
+
+  private flushPendingForReasoning(partID: string, _ordinal: number): void {
+    const buf = this.pendingDeltas.get(partID);
+    if (!buf || buf.length === 0) return;
+    this.pendingDeltas.delete(partID);
+    for (const d of buf) this.appendReasoningDelta(partID, d);
+  }
+
+  // Catch-all flush invoked on session.idle. Any partIDs that still have
+  // buffered deltas at this point never received a message.part.updated
+  // snapshot to tag their kind — almost always text, because reasoning
+  // streams reliably get snapshots. Routing as text means finalText() will
+  // contain the assistant output (and any JSON inside it).
+  private flushAllPendingAsText(): void {
+    if (this.pendingDeltas.size === 0) return;
+    for (const [partID, buf] of this.pendingDeltas) {
+      this.partKinds.set(partID, "text");
+      for (const d of buf) this.appendTextDelta(partID, d);
+    }
+    this.pendingDeltas.clear();
   }
 }

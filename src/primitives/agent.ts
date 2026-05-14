@@ -13,13 +13,29 @@ export interface AgentOptions {
   tools?: Record<string, boolean>;
   cwd?: string;
   timeoutMs?: number;
+  // Override the runner-level default for how many times we feed a schema
+  // error back to the AI before declaring the agent dead.
+  maxSchemaRetries?: number;
 }
+
+// Permissive default schema applied to every agent() call that doesn't
+// supply one. Forces JSON output across the board: the model is prompted
+// to emit a JSON object (via describeSchemaForPrompt) and the server binds
+// its native json_schema mode. Callers that need a strict shape pass their
+// own schema; callers that just want "any JSON" get this.
+const DEFAULT_SCHEMA: JSONSchema = {
+  type: "object",
+  description:
+    "Respond with a JSON object. Use whatever keys make sense for the task.",
+};
 
 export function makeAgentPrimitive(ctx: RunContext) {
   return async function agent(prompt: string, opts: AgentOptions = {}): Promise<unknown> {
     const agentId = uuid();
     const cwd = opts.cwd ?? ctx.config.defaultCwd;
-    const sHash = opts.schema ? schemaHash(opts.schema) : undefined;
+    // Every launch enforces JSON. opts.schema overrides the default.
+    const schema: JSONSchema = opts.schema ?? DEFAULT_SCHEMA;
+    const sHash = schemaHash(schema);
     const tStart = nowMs();
     ctx.bus.emit({
       kind: "agent.start",
@@ -39,13 +55,15 @@ export function makeAgentPrimitive(ctx: RunContext) {
 
     let aborter: (() => Promise<void>) | null = null;
     try {
+      const maxSchemaRetries = opts.maxSchemaRetries ?? ctx.config.maxSchemaRetries;
       const handle = await ctx.driver.run(cwd, {
         prompt,
-        schema: opts.schema,
+        schema,
         model: opts.model ?? ctx.config.defaultModel ?? undefined,
         agent: opts.agent ?? ctx.config.defaultAgent ?? undefined,
         tools: opts.tools,
         timeoutMs: opts.timeoutMs ?? ctx.config.agentTimeoutMs,
+        maxSchemaRetries,
         onSessionAssigned: (sessionID, messageID) => {
           ctx.bus.emit({
             kind: "agent.session",
@@ -101,6 +119,23 @@ export function makeAgentPrimitive(ctx: RunContext) {
             output: call.output,
             error: call.error,
             elapsedMs: (call.endMs ?? Date.now()) - call.startMs,
+            t: nowMs(),
+          });
+        },
+        onSchemaRetry: (attempt, error) => {
+          ctx.bus.emit({
+            kind: "agent.schemaRetry",
+            runId: ctx.runId,
+            agentId,
+            attempt,
+            maxRetries: maxSchemaRetries,
+            error,
+            t: nowMs(),
+          });
+          ctx.bus.emit({
+            kind: "workflow.log",
+            runId: ctx.runId,
+            msg: `agent() schema retry ${attempt}/${maxSchemaRetries}: ${error}`,
             t: nowMs(),
           });
         },

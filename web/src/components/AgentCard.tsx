@@ -1,14 +1,14 @@
 import { Link } from "react-router-dom";
-import { useRun } from "../store/runStore";
-import { TokenStream } from "./TokenStream";
-import { ToolCallList } from "./ToolCallList";
+import { useRun, timelineFor } from "../store/runStore";
 import { SchemaBadge } from "./SchemaBadge";
 import { RawEventLog } from "./RawEventLog";
+import { Timeline } from "./Timeline";
 
 export function AgentCard({ agentId, runId }: { agentId: string; runId: string }) {
   const a = useRun((s) => s.agents[agentId]);
   if (!a) return null;
   const elapsed = (a.endedAt ?? Date.now()) - a.startedAt;
+  const items = timelineFor(a);
   return (
     <div style={{
       background: "#15161e",
@@ -38,30 +38,10 @@ export function AgentCard({ agentId, runId }: { agentId: string; runId: string }
         {a.phase && <span style={{ marginRight: 8 }}>[{a.phase}]</span>}
         <span title={a.cwd}>{shorten(a.cwd, 50)}</span>
       </div>
-      {a.reasoning && (
-        <details style={{ margin: "0 0 8px", fontSize: 12 }}>
-          <summary style={{ cursor: "pointer", color: "#b6a4ff", padding: "4px 0" }}>
-            thinking ({a.reasoning.length.toLocaleString()} chars)
-          </summary>
-          <pre style={{
-            background: "#0c0c10",
-            padding: 8,
-            borderRadius: 4,
-            maxHeight: 200,
-            overflowY: "auto",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            color: "#b6a4ff",
-            margin: "4px 0 0",
-            opacity: 0.85,
-          }}>
-            {a.reasoning}
-          </pre>
-        </details>
-      )}
-      <TokenStream text={a.rawText ?? a.text} />
-      <ToolCallList calls={a.toolCalls} />
-      <RawEventLog events={a.rawEvents} maxHeight={220} />
+      <Timeline items={items} dense />
+      <div style={{ marginTop: 8 }}>
+        <RawEventLog events={a.rawEvents} maxHeight={220} />
+      </div>
     </div>
   );
 }

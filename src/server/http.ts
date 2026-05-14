@@ -29,9 +29,28 @@ const STATIC_INDEX_HTML = `<!doctype html>
     .status.running { background: #5a4400; color: #ffdf6f; }
     .status.ok { background: #224d22; color: #94f094; }
     .status.fail { background: #4d2222; color: #f09494; }
-    .reasoning { margin: 6px 0; font-size: 12px; }
-    .reasoning summary { cursor: pointer; color: #b6a4ff; padding: 2px 0; }
-    .reasoning pre { background: #0c0c10; padding: 6px 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; color: #b6a4ff; opacity: 0.85; margin: 4px 0 0; }
+    /* Per-agent timeline: text / reasoning / tool blocks rendered in
+       opencode part-ordinal order. Each block uses a coloured left border
+       to make the type readable at a glance. */
+    .timeline { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .tl-block { font-size: 12px; padding: 6px 8px; border-radius: 0 4px 4px 0; background: #11141c; border-left: 3px solid #555; }
+    .tl-block .tl-head { display: flex; align-items: baseline; gap: 6px; font-weight: 600; font-size: 11px; }
+    .tl-block .tl-ord { opacity: 0.55; font-weight: 400; }
+    .tl-block .tl-body { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; background: #0c0c10; border-radius: 4px; padding: 6px; }
+    .tl-block.text { border-left-color: #4ea0ff; }
+    .tl-block.text .tl-head { color: #8ad7ff; }
+    .tl-block.text .tl-body { color: #e9e9ee; }
+    .tl-block.reasoning { border-left-color: #6a5cff; background: #16131f; }
+    .tl-block.reasoning .tl-head { color: #b6a4ff; cursor: pointer; }
+    .tl-block.reasoning .tl-body { color: #b6a4ff; opacity: 0.9; display: none; }
+    .tl-block.reasoning.open .tl-body { display: block; }
+    .tl-block.tool { background: #1a1c26; }
+    .tl-block.tool.completed { border-left-color: #4ecb71; }
+    .tl-block.tool.error { border-left-color: #cb4e4e; }
+    .tl-block.tool .tl-head { color: #bbb; }
+    .tl-block.tool .tl-cmd { color: #bbb; font-family: ui-monospace, SF Mono, Menlo, monospace; margin-top: 2px; word-break: break-all; }
+    .tl-block.tool .tl-output { color: #9ef0aa; margin: 4px 0 0; white-space: pre-wrap; max-height: 160px; overflow-y: auto; background: #0c0c10; padding: 6px; border-radius: 4px; font-family: ui-monospace, SF Mono, Menlo, monospace; }
+    .tl-block.tool .tl-output.err { color: #f09494; }
     .raw-events { margin: 6px 0; font-size: 12px; }
     .raw-events summary { cursor: pointer; color: #9ec5ff; padding: 2px 0; }
     .raw-events .raw-list { background: #0c0c10; border: 1px solid #292932; border-radius: 4px; max-height: 220px; overflow-y: auto; margin-top: 4px; }
@@ -40,10 +59,6 @@ const STATIC_INDEX_HTML = `<!doctype html>
     .raw-events .raw-row .raw-time { opacity: 0.5; font-family: ui-monospace, SF Mono, Menlo, monospace; margin-right: 8px; }
     .raw-events .raw-row pre { background: #000; padding: 6px; border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; margin: 4px 0 0; display: none; }
     .raw-events .raw-row.open pre { display: block; }
-    .tools { margin-top: 8px; font-size: 12px; color: #aaa; }
-    .tool { background: #1a1c26; border-left: 3px solid #555; padding: 4px 8px; margin: 4px 0; border-radius: 0 4px 4px 0; }
-    .tool.completed { border-left-color: #4ecb71; }
-    .tool.error { border-left-color: #cb4e4e; }
     .phases { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 16px; }
     .phase-pill { background: #1f2030; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
     .phase-pill.active { background: #3d4e6b; color: #fff; }
@@ -160,18 +175,8 @@ function handle(ev) {
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = (ev.phase ? "[" + ev.phase + "] " : "") + ev.cwd;
-    const reasoning = document.createElement("details");
-    reasoning.className = "reasoning";
-    reasoning.style.display = "none";
-    const reasoningSummary = document.createElement("summary");
-    reasoningSummary.textContent = "thinking";
-    const reasoningPre = document.createElement("pre");
-    reasoning.append(reasoningSummary, reasoningPre);
-    const pre = document.createElement("pre");
-    pre.dataset.role = "stream";
-    const tools = document.createElement("div");
-    tools.className = "tools";
-    tools.dataset.role = "tools";
+    const timeline = document.createElement("div");
+    timeline.className = "timeline";
     const rawDetails = document.createElement("details");
     rawDetails.className = "raw-events";
     const rawSummary = document.createElement("summary");
@@ -179,52 +184,85 @@ function handle(ev) {
     const rawList = document.createElement("div");
     rawList.className = "raw-list";
     rawDetails.append(rawSummary, rawList);
-    card.append(head, meta, reasoning, pre, tools, rawDetails);
+    card.append(head, meta, timeline, rawDetails);
     grid.appendChild(card);
-    agents.set(ev.agentId, { card, status, pre, tools, reasoning, reasoningPre, reasoningSummary, rawDetails, rawSummary, rawList, rawCount: 0 });
+    // textParts / reasoningParts keyed by partID; tools keyed by callID.
+    // Each block carries its ordinal so insertOrdered() can keep the
+    // timeline in opencode arrival order.
+    agents.set(ev.agentId, {
+      card, status, timeline,
+      textParts: new Map(), reasoningParts: new Map(), tools: new Map(),
+      rawDetails, rawSummary, rawList, rawCount: 0,
+    });
   } else if (ev.kind === "agent.token") {
     const a = agents.get(ev.agentId);
-    if (a) {
-      a.pre.textContent += ev.delta;
-      a.pre.scrollTop = a.pre.scrollHeight;
+    if (!a) return;
+    let block = a.textParts.get(ev.partID);
+    if (!block) {
+      block = makeTextBlock(ev.ordinal);
+      a.textParts.set(ev.partID, block);
+      insertOrdered(a.timeline, block.el, ev.ordinal);
     }
+    block.body.textContent += ev.delta;
+    block.body.scrollTop = block.body.scrollHeight;
   } else if (ev.kind === "agent.reasoning") {
     const a = agents.get(ev.agentId);
-    if (a) {
-      a.reasoning.style.display = "block";
-      a.reasoningPre.textContent += ev.delta;
-      a.reasoningPre.scrollTop = a.reasoningPre.scrollHeight;
-      a.reasoningSummary.textContent = "thinking (" + a.reasoningPre.textContent.length.toLocaleString() + " chars)";
+    if (!a) return;
+    let block = a.reasoningParts.get(ev.partID);
+    if (!block) {
+      block = makeReasoningBlock(ev.ordinal);
+      a.reasoningParts.set(ev.partID, block);
+      insertOrdered(a.timeline, block.el, ev.ordinal);
     }
+    block.body.textContent += ev.delta;
+    block.body.scrollTop = block.body.scrollHeight;
+    block.head.textContent = "thinking ";
+    const ord = document.createElement("span");
+    ord.className = "tl-ord";
+    ord.textContent = "#" + ev.ordinal + " · " + block.body.textContent.length.toLocaleString() + " chars";
+    block.head.appendChild(ord);
   } else if (ev.kind === "agent.raw") {
     const a = agents.get(ev.agentId);
     if (a) appendRawEvent(a, ev);
   } else if (ev.kind === "agent.tool.start") {
     const a = agents.get(ev.agentId);
     if (!a) return;
-    const t = document.createElement("div");
-    t.className = "tool";
-    t.id = "c-" + ev.agentId + "-" + ev.callID;
-    t.textContent = ev.tool + ": " + JSON.stringify(ev.input).slice(0, 200);
-    a.tools.appendChild(t);
+    const block = makeToolBlock(ev.ordinal, ev.tool, ev.input);
+    a.tools.set(ev.callID, block);
+    insertOrdered(a.timeline, block.el, ev.ordinal);
   } else if (ev.kind === "agent.tool.result") {
-    const t = document.getElementById("c-" + ev.agentId + "-" + ev.callID);
-    if (t) {
-      t.classList.add(ev.status === "error" ? "error" : "completed");
-      t.textContent += "  →  " + (ev.status === "error" ? (ev.error || "err") : (ev.output ? ev.output.slice(0,200) : "(ok)"));
+    const a = agents.get(ev.agentId);
+    if (!a) return;
+    const block = a.tools.get(ev.callID);
+    if (!block) return;
+    block.el.classList.add(ev.status === "error" ? "error" : "completed");
+    const outEl = document.createElement("pre");
+    outEl.className = "tl-output" + (ev.status === "error" ? " err" : "");
+    const body = ev.status === "error"
+      ? (ev.error || "(error)")
+      : (ev.output != null ? String(ev.output) : "(ok)");
+    outEl.textContent = body.length > 4000 ? body.slice(0, 4000) + "\\n…[truncated " + (body.length - 4000) + " chars]" : body;
+    block.el.appendChild(outEl);
+    if (ev.elapsedMs != null) {
+      const meta = block.el.querySelector(".tl-ord");
+      if (meta) meta.textContent = "#" + block.ordinal + " · " + ev.elapsedMs + "ms";
     }
   } else if (ev.kind === "agent.end") {
     const a = agents.get(ev.agentId);
-    if (a) {
-      a.status.textContent = ev.ok ? "ok" : (ev.reason || "fail");
-      a.status.className = "status " + (ev.ok ? "ok" : "fail");
-      // Backfill the streamed pre with the canonical full LLM output —
-      // this is the assembled assistant text from every text part, even
-      // if individual stream deltas were dropped. Tool inputs/outputs
-      // remain in the dedicated tool list below.
-      if (ev.rawText && ev.rawText.length > a.pre.textContent.length) {
-        a.pre.textContent = ev.rawText;
-        a.pre.scrollTop = a.pre.scrollHeight;
+    if (!a) return;
+    a.status.textContent = ev.ok ? "ok" : (ev.reason || "fail");
+    a.status.className = "status " + (ev.ok ? "ok" : "fail");
+    // Backfill the LAST text part with the canonical assembled text from
+    // SessionTracker.finalText() if any stream deltas were dropped. Tool
+    // inputs/outputs are already inline within their timeline slots.
+    if (ev.rawText && a.textParts.size > 0) {
+      let last = null;
+      let lastOrd = -1;
+      a.textParts.forEach((blk, _id) => {
+        if (blk.ordinal > lastOrd) { lastOrd = blk.ordinal; last = blk; }
+      });
+      if (last && last.body.textContent.length < ev.rawText.length) {
+        last.body.textContent = ev.rawText;
       }
     }
   } else if (ev.kind === "workflow.end") {
@@ -232,6 +270,78 @@ function handle(ev) {
   } else if (ev.kind === "workflow.log") {
     console.log("[log]", ev.msg, ev.meta);
   }
+}
+
+// Walk the timeline children and insert the new block before the first
+// existing block with a higher ordinal. Ordinals are stable per partID/callID,
+// so updates never need to reorder.
+function insertOrdered(container, el, ordinal) {
+  el.dataset.ordinal = String(ordinal);
+  const kids = container.children;
+  for (let i = 0; i < kids.length; i++) {
+    const o = Number(kids[i].dataset.ordinal || "0");
+    if (o > ordinal) { container.insertBefore(el, kids[i]); return; }
+  }
+  container.appendChild(el);
+}
+
+function makeTextBlock(ordinal) {
+  const el = document.createElement("div");
+  el.className = "tl-block text";
+  const head = document.createElement("div");
+  head.className = "tl-head";
+  const label = document.createElement("span");
+  label.textContent = "message";
+  const ord = document.createElement("span");
+  ord.className = "tl-ord";
+  ord.textContent = "#" + ordinal;
+  head.append(label, ord);
+  const body = document.createElement("pre");
+  body.className = "tl-body";
+  el.append(head, body);
+  return { el, head, body, ordinal };
+}
+
+function makeReasoningBlock(ordinal) {
+  const el = document.createElement("div");
+  el.className = "tl-block reasoning";
+  const head = document.createElement("div");
+  head.className = "tl-head";
+  head.textContent = "thinking ";
+  const ord = document.createElement("span");
+  ord.className = "tl-ord";
+  ord.textContent = "#" + ordinal;
+  head.append(ord);
+  const body = document.createElement("pre");
+  body.className = "tl-body";
+  el.append(head, body);
+  // Click the heading to expand/collapse the chain-of-thought body.
+  head.addEventListener("click", () => el.classList.toggle("open"));
+  return { el, head, body, ordinal };
+}
+
+function makeToolBlock(ordinal, tool, input) {
+  const el = document.createElement("div");
+  el.className = "tl-block tool";
+  const head = document.createElement("div");
+  head.className = "tl-head";
+  const label = document.createElement("span");
+  label.textContent = tool;
+  const ord = document.createElement("span");
+  ord.className = "tl-ord";
+  ord.textContent = "#" + ordinal + " · running…";
+  head.append(label, ord);
+  const cmd = document.createElement("div");
+  cmd.className = "tl-cmd";
+  if (tool && tool.toLowerCase() === "bash" && input && input.command) {
+    cmd.textContent = "$ " + String(input.command);
+  } else {
+    let s;
+    try { s = JSON.stringify(input); } catch (_e) { s = String(input); }
+    cmd.textContent = s && s.length > 240 ? s.slice(0, 240) + "…" : (s || "");
+  }
+  el.append(head, cmd);
+  return { el, head, cmd, ordinal };
 }
 
 function appendRawEvent(a, ev) {

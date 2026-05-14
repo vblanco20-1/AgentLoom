@@ -26,6 +26,9 @@ export interface RunnerConfig {
   maxAgentsTotal?: number;
   maxAgentsPerWorktree?: number;
   agentTimeoutMs?: number;
+  // How many times to feed a JSON / schema parse error back to the model
+  // before declaring the agent dead. Default 5 (so up to 6 total attempts).
+  maxSchemaRetries?: number;
   opencode?: OpencodeConfig;
   mcp?: Record<string, unknown>;
   web?: WebConfig;
@@ -40,6 +43,7 @@ export interface ResolvedRunnerConfig {
   maxAgentsTotal: number;
   maxAgentsPerWorktree: number;
   agentTimeoutMs: number;
+  maxSchemaRetries: number;
   opencode: Required<OpencodeConfig>;
   mcp: Record<string, unknown>;
   web: Required<WebConfig>;

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { RawEventEntry } from "../store/runStore";
+import { useStickyScroll } from "../lib/useStickyScroll";
 
 export function RawEventLog({ events, maxHeight = 320, defaultOpen = false }: {
   events: RawEventEntry[];
@@ -7,11 +8,12 @@ export function RawEventLog({ events, maxHeight = 320, defaultOpen = false }: {
   defaultOpen?: boolean;
 }) {
   const [filter, setFilter] = useState("");
-  if (events.length === 0) return null;
   const norm = filter.trim().toLowerCase();
   const filtered = norm.length === 0
     ? events
     : events.filter((e) => e.evType.toLowerCase().includes(norm));
+  const listRef = useStickyScroll<HTMLDivElement>(filtered.length);
+  if (events.length === 0) return null;
   return (
     <details open={defaultOpen} style={{ margin: "0 0 8px", fontSize: 12 }}>
       <summary style={{ cursor: "pointer", color: "#9ec5ff", padding: "4px 0" }}>
@@ -22,7 +24,7 @@ export function RawEventLog({ events, maxHeight = 320, defaultOpen = false }: {
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="filter by type (e.g. todo, file, message.part)"
+          placeholder="filter by type (e.g. todo, file, session)"
           style={{
             width: "100%",
             background: "#0c0c10",
@@ -34,7 +36,7 @@ export function RawEventLog({ events, maxHeight = 320, defaultOpen = false }: {
             marginBottom: 6,
           }}
         />
-        <div style={{
+        <div ref={listRef} style={{
           background: "#0c0c10",
           border: "1px solid #292932",
           borderRadius: 4,
