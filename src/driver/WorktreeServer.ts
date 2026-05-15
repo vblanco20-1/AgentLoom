@@ -198,21 +198,24 @@ export class WorktreeServer {
       agent?: string;
       tools?: Record<string, boolean>;
       text: string;
-      // Schema to enforce server-side via opencode's structured-output mode.
-      // When provided, opencode 1.14+ binds the model's native JSON mode (or
-      // re-prompts up to retryCount times if the response misses the schema)
-      // — drastically more reliable than relying on the model to read our
-      // describeSchemaForPrompt block.
-      schema?: Record<string, unknown>;
-      schemaRetryCount?: number;
     },
   ): Promise<void> {
     if (!this.client) throw new Error("WorktreeServer.client not initialized");
-    // v2's promptAsync takes a flat params object. `format: OutputFormat`
-    // binds opencode's native structured-output enforcement: the model is
-    // constrained to a JSON object matching `schema`, and opencode re-prompts
-    // up to retryCount times if a reply violates it before surfacing the
-    // error.
+    // We deliberately do NOT pass `format: { type: "json_schema", ... }` here.
+    // opencode's native structured-output mode forces toolChoice="required"
+    // and adds a StructuredOutput tool whose args are pre-validated by the AI
+    // SDK. When the model emits a tool call that fails schema validation, the
+    // tool's onSuccess never fires, finish stays "tool-calls", and opencode's
+    // outer runLoop returns "continue" — re-prompting the model in the same
+    // session with toolChoice=required still in force. The model produces bad
+    // JSON again; loop repeats; session.idle is never emitted. The agent
+    // spirals until our agentTimeoutMs fires. retryCount on the SDK type is a
+    // dead field — prompt.ts never reads it.
+    //
+    // Schema enforcement is handled out-of-band by runPrompt: the schema is
+    // inlined in the prompt text via describeSchemaForPrompt, the response is
+    // parsed by extractJson, and validation failures trigger a follow-up turn
+    // in the same session via buildRetryPrompt.
     const params: Parameters<OpencodeClient["session"]["promptAsync"]>[0] = {
       sessionID,
       directory: this.cwd,
@@ -222,13 +225,6 @@ export class WorktreeServer {
     if (body.model) params.model = body.model;
     if (body.agent) params.agent = body.agent;
     if (body.tools) params.tools = body.tools;
-    if (body.schema) {
-      params.format = {
-        type: "json_schema",
-        schema: body.schema,
-        retryCount: body.schemaRetryCount ?? 2,
-      };
-    }
     const res = await this.client.session.promptAsync(params);
     const error = (res as { error?: unknown }).error;
     if (error) {
@@ -243,6 +239,31 @@ export class WorktreeServer {
       await this.client.session.abort({ sessionID, directory: this.cwd });
     } catch {
       // best-effort
+    }
+  }
+
+  // Forward a UI decision on an opencode permission.asked event. Mirrors
+  // POST /permission/{requestID}/reply. `reply: "once"` allows just this
+  // request, `"always"` updates opencode's session rule, `"reject"` denies.
+  async replyPermission(
+    requestID: string,
+    reply: "once" | "always" | "reject",
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!this.client) return { ok: false, error: "WorktreeServer not booted" };
+    try {
+      const res = await this.client.permission.reply({
+        requestID,
+        directory: this.cwd,
+        reply,
+      });
+      const error = (res as { error?: unknown }).error;
+      if (error) {
+        const msg = typeof error === "string" ? error : JSON.stringify(error);
+        return { ok: false, error: msg };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
     }
   }
 

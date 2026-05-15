@@ -1,5 +1,5 @@
 import { schemaHash, type JSONSchema } from "../driver/schema.ts";
-import type { RunContext } from "./runtime.ts";
+import type { AgentControl, RunContext } from "./runtime.ts";
 import { poolForCwd } from "./runtime.ts";
 import { uuid } from "../util/uuid.ts";
 import { nowMs } from "../bus/events.ts";
@@ -30,13 +30,29 @@ const DEFAULT_SCHEMA: JSONSchema = {
 };
 
 export function makeAgentPrimitive(ctx: RunContext) {
-  return async function agent(prompt: string, opts: AgentOptions = {}): Promise<unknown> {
+  const agentFn = async function agent(prompt: string, opts: AgentOptions = {}): Promise<unknown> {
     const agentId = uuid();
     const cwd = opts.cwd ?? ctx.config.defaultCwd;
     // Every launch enforces JSON. opts.schema overrides the default.
     const schema: JSONSchema = opts.schema ?? DEFAULT_SCHEMA;
     const sHash = schemaHash(schema);
     const tStart = nowMs();
+    // Register a control slot before we emit agent.start so the UI never
+    // sees an agent it can't interact with. The slot's abort is a no-op
+    // until the handle is created; retry is wired up right away.
+    const control: AgentControl = {
+      agentId,
+      abort: async () => { /* not yet running */ },
+      retry: async () => {
+        // Re-launch the same prompt as a brand-new agent. We deliberately
+        // don't await — the workflow only sees the original invocation's
+        // result, and a UI-triggered retry is fire-and-forget so the user
+        // can compare runs without blocking anything.
+        void agentFn(prompt, opts);
+      },
+      ended: false,
+    };
+    ctx.agentControls.set(agentId, control);
     ctx.bus.emit({
       kind: "agent.start",
       runId: ctx.runId,
@@ -158,6 +174,7 @@ export function makeAgentPrimitive(ctx: RunContext) {
 
       aborter = handle.abort;
       ctx.activeAborts.add(handle.abort);
+      control.abort = handle.abort;
       const r = await handle.result;
       ctx.activeAborts.delete(handle.abort);
 
@@ -215,8 +232,13 @@ export function makeAgentPrimitive(ctx: RunContext) {
       return null;
     } finally {
       if (aborter) ctx.activeAborts.delete(aborter);
+      // Mark the control as ended so abort becomes a no-op, but keep the
+      // retry closure usable for post-mortem re-runs from the UI.
+      control.ended = true;
+      control.abort = async () => { /* already ended */ };
       release();
       releaseGlobal();
     }
   };
+  return agentFn;
 }

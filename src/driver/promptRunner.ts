@@ -1,7 +1,7 @@
 import { compileSchema, describeSchemaForPrompt, extractJson, type JSONSchema } from "./schema.ts";
 import { SessionTracker } from "./SessionTracker.ts";
 import { WorktreeServer } from "./WorktreeServer.ts";
-import { uuid } from "../util/uuid.ts";
+import { ascendingMessageId } from "../util/uuid.ts";
 
 export interface PromptRequest {
   prompt: string;
@@ -78,9 +78,13 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         return { ok: false, reason: "abort", rawText: lastRawText, elapsedMs: Date.now() - t0 };
       }
 
-      // opencode's prompt_async API requires messageID to start with "msg"
-      // (validation error: "Expected a string starting with \"msg\"").
-      const messageID = `msg_${uuid().replace(/-/g, "")}`;
+      // Use ascendingMessageId() (not random UUID hex) so the user
+      // messageID sorts lexicographically BEFORE any opencode-generated
+      // assistant ID. opencode's runLoop break check is a string compare
+      // `lastUser.id < lastAssistant.id`; a random `msg_<uuid>` violates
+      // that ~12% of the time in the current epoch, which makes opencode
+      // loop forever generating empty assistant messages. See uuid.ts.
+      const messageID = ascendingMessageId();
       const text = attempt === 0
         ? (req.schema ? `${req.prompt}\n${describeSchemaForPrompt(req.schema)}` : req.prompt)
         : buildRetryPrompt(lastRawText, lastSchemaError, req.schema!);
@@ -90,18 +94,16 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         req.onSchemaRetry?.(attempt, lastSchemaError);
       }
 
-      const idleP = new Promise<void>((resolve) => {
-        tracker = new SessionTracker(sessionID!, messageID, {
-          onTokenDelta: req.onTokenDelta,
-          onReasoningDelta: req.onReasoningDelta,
-          onToolStart: req.onToolStart,
-          onToolResult: req.onToolResult,
-          onRawEvent: req.onRawEvent,
-          onSessionIdle: () => resolve(),
-          onSessionError: () => resolve(),
-        });
-        server.registerTracker(tracker);
+      tracker = new SessionTracker(sessionID!, messageID, {
+        onTokenDelta: req.onTokenDelta,
+        onReasoningDelta: req.onReasoningDelta,
+        onToolStart: req.onToolStart,
+        onToolResult: req.onToolResult,
+        onRawEvent: req.onRawEvent,
+        onSessionIdle: () => {},
+        onSessionError: () => {},
       });
+      server.registerTracker(tracker);
 
       try {
         await server.sendPromptAsync(sessionID, {
@@ -110,11 +112,6 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
           agent: req.agent,
           tools: req.tools,
           text,
-          // When the caller supplied a schema, also bind opencode's
-          // server-side json_schema format so the model's native structured
-          // output kicks in (with built-in retry). Our describeSchemaForPrompt
-          // block in fullPrompt remains as a fallback for older servers.
-          schema: req.schema as Record<string, unknown> | undefined,
         });
       } catch (err) {
         if (timer) clearTimeout(timer);
@@ -128,8 +125,14 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         };
       }
 
-      await idleP;
-      server.unregisterTracker(tracker!);
+      // whenDone() resolves on ANY terminal transition: session.idle,
+      // session.error, or our local markAbort/markTimeout/markInternal. The
+      // old pattern of awaiting a promise wired only to onSessionIdle/onError
+      // could deadlock if the outer timer (req.timeoutMs) fired — markTimeout
+      // set done=true but never resolved the await, so the runner just hung
+      // with no error and no retry.
+      await tracker.whenDone();
+      server.unregisterTracker(tracker);
 
       const rawText = tracker!.finalText();
       const reason = tracker!.reason();
@@ -166,9 +169,21 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         return { ok: true, data: rawText.trim(), rawText, elapsedMs: Date.now() - t0 };
       }
 
-      const parsed = extractJson(rawText);
+      // For multi-step agents that called tools, narrow JSON extraction to
+      // the text emitted AFTER the last tool call — that's the model's final
+      // reply. Earlier prose (planning, tool-input echoes like
+      // "I'll read with {\"file\": \"x.json\"}", intermediate scratch shapes)
+      // contains balanced-brace candidates that extractJson would otherwise
+      // pick up and rank ahead of the real answer. Simple agents emit no
+      // tool calls; finalAnswerText() returns "" in that case and we fall
+      // back to the full rawText so their behaviour is unchanged.
+      const answerSlice = tracker!.finalAnswerText();
+      const extractSource = answerSlice || rawText;
+      const parsed = extractJson(extractSource, {
+        validate: (d) => compiledValidate(d).ok,
+      });
       if (parsed === undefined) {
-        lastSchemaError = "Response contained no parseable JSON object. Reply with ONLY a JSON object — no prose, no markdown, no code fences.";
+        lastSchemaError = "Response contained no parseable JSON. Reply with ONLY a JSON object — no prose, no markdown, no code fences, no preamble. First character must be `{`.";
         continue;
       }
       const v = compiledValidate(parsed);
@@ -211,19 +226,24 @@ function buildRetryPrompt(lastRawText: string, schemaError: string, schema: JSON
     ? `${lastRawText.slice(0, 400)}\n…[truncated]…\n${lastRawText.slice(-200)}`
     : lastRawText;
   return [
-    "Your previous response could not be parsed against the required JSON schema.",
+    "Your previous response did not satisfy the required JSON schema.",
     "",
-    `Error: ${schemaError}`,
+    `Validator said: ${schemaError}`,
     "",
-    "Previous response was:",
-    "```",
+    "What you returned:",
+    "<<<",
     excerpt,
-    "```",
+    ">>>",
     "",
-    "Please reply again with ONLY a single JSON object matching this schema. No prose, no markdown, no code fences:",
+    "Reply again. Strict rules:",
+    "  • Output ONLY the JSON value — no prose before or after.",
+    "  • No markdown, no code fences, no \"```json\" wrapper.",
+    "  • No preamble like \"Here is\" or \"Sure,\".",
+    "  • The first character of your reply must be `{` (or `[`).",
+    "  • The last character must be `}` (or `]`).",
+    "  • Fill every required field with real data — do not return `{}` as a placeholder.",
     "",
-    "```json",
+    "Schema:",
     JSON.stringify(schema, null, 2),
-    "```",
   ].join("\n");
 }

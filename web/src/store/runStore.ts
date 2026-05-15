@@ -35,6 +35,18 @@ export interface RawEventEntry {
   t: number;
 }
 
+// Pending opencode permission ask that the agent is blocked on. The UI
+// surfaces these as a row of allow/always/deny buttons on the agent card;
+// the entry is removed when permission.replied arrives for the same id,
+// or when the agent ends.
+export interface PendingPermission {
+  requestID: string;
+  permission: string;       // e.g. "external_directory", "bash"
+  patterns: string[];       // opencode's suggested "always" patterns
+  metadata: Record<string, unknown>;
+  askedAt: number;
+}
+
 export interface AgentState {
   agentId: string;
   label?: string;
@@ -56,6 +68,10 @@ export interface AgentState {
   // file.edited, step-start/finish, snapshot, patch, retry, compaction,
   // message.updated with finish reason / token usage, etc.) is never lost.
   rawEvents: RawEventEntry[];
+  // Pending permission asks keyed by requestID. Populated from agent.raw
+  // when opencode emits permission.asked; entries are removed on
+  // permission.replied or agent.end.
+  pendingPermissions: Record<string, PendingPermission>;
   status: "running" | "ok" | "fail" | "queued";
   reason?: string;
   startedAt: number;
@@ -113,6 +129,7 @@ export const useRun = create<RunState>((set) => ({
           reasoningParts: [],
           toolCalls: [],
           rawEvents: [],
+          pendingPermissions: {},
           status: "running",
           startedAt: ev.t,
         };
@@ -151,7 +168,41 @@ export const useRun = create<RunState>((set) => ({
         const next = a.rawEvents.length >= 2000
           ? [...a.rawEvents.slice(-1999), { evType: ev.evType, payload: ev.payload, t: ev.t }]
           : [...a.rawEvents, { evType: ev.evType, payload: ev.payload, t: ev.t }];
-        return { ...s, agents: { ...s.agents, [ev.agentId]: { ...a, rawEvents: next } } };
+        // Side-channel: also project permission.asked / permission.replied
+        // into a structured pendingPermissions map so the card can render
+        // approve/deny buttons without re-parsing the raw event log.
+        let pending = a.pendingPermissions;
+        if (ev.evType === "permission.asked") {
+          const p = ev.payload as {
+            id?: string;
+            permission?: string;
+            patterns?: string[];
+            metadata?: Record<string, unknown>;
+          } | undefined;
+          if (p?.id) {
+            pending = {
+              ...pending,
+              [p.id]: {
+                requestID: p.id,
+                permission: p.permission ?? "unknown",
+                patterns: Array.isArray(p.patterns) ? p.patterns : [],
+                metadata: p.metadata ?? {},
+                askedAt: ev.t,
+              },
+            };
+          }
+        } else if (ev.evType === "permission.replied") {
+          // opencode emits {sessionID, requestID, reply}; older builds used
+          // `id` / `permissionID` — accept any of them so we don't leave
+          // stale rows on the UI.
+          const p = ev.payload as { id?: string; requestID?: string; permissionID?: string } | undefined;
+          const key = p?.requestID ?? p?.id ?? p?.permissionID;
+          if (key && pending[key]) {
+            const { [key]: _drop, ...rest } = pending;
+            pending = rest;
+          }
+        }
+        return { ...s, agents: { ...s.agents, [ev.agentId]: { ...a, rawEvents: next, pendingPermissions: pending } } };
       }
       case "agent.tool.start": {
         const a = s.agents[ev.agentId];
@@ -185,6 +236,9 @@ export const useRun = create<RunState>((set) => ({
               endedAt: ev.t,
               output: ev.output,
               rawText: ev.rawText,
+              // The agent is gone — any leftover permission asks can't be
+              // satisfied anymore, so drop them from the UI.
+              pendingPermissions: {},
             },
           },
         };

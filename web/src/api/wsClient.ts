@@ -39,6 +39,14 @@ export class RunWsClient {
     this.ws?.send(JSON.stringify({ type: "abort-agent", agentId }));
   }
 
+  retryAgent(agentId: string): void {
+    this.ws?.send(JSON.stringify({ type: "retry-agent", agentId }));
+  }
+
+  replyPermission(requestID: string, reply: "once" | "always" | "reject"): void {
+    this.ws?.send(JSON.stringify({ type: "permission-reply", requestID, reply }));
+  }
+
   close(): void {
     this.ws?.close();
   }

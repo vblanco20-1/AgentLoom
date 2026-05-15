@@ -95,11 +95,19 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const log = makeLogPrimitive(ctx);
 
   let httpServer: Awaited<ReturnType<typeof startHttpServer>> | null = null;
+  let unregisterRun: (() => void) | null = null;
   if (cfg.web.port > 0) {
     httpServer = await startHttpServer(
       { port: cfg.web.port, runsDir: cfg.runsDir },
       bus,
     );
+    // Expose this run's control surface to the WS layer so the UI's
+    // per-agent abort/retry and permission.asked approval buttons land on
+    // the live agentControls map + the booted OpencodeDriver.
+    unregisterRun = httpServer.registerRun(runId, {
+      agentControls: ctx.agentControls,
+      replyPermission: (requestID, reply) => driver.replyPermission(requestID, reply),
+    });
     process.stderr.write(`agent-runner web: ${httpServer.url}/run/${runId}\n`);
     if (cfg.web.openBrowser) {
       void openBrowser(`${httpServer.url}/run/${runId}`);
@@ -190,6 +198,7 @@ export async function runCli(opts: RunOptions): Promise<number> {
     // Keep server alive for headless inspection only when explicitly requested.
     // Default: close after run so the CLI exits cleanly.
   }
+  if (unregisterRun) unregisterRun();
   if (httpServer) httpServer.close();
   process.off("SIGINT",  onInterrupt);
   process.off("SIGTERM", onTerm);

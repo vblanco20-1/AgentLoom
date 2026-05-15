@@ -378,12 +378,23 @@ export interface HttpServerOptions {
   webDistDir?: string; // optional path to Vite-built React UI; falls back to STATIC.
 }
 
+// Control surface the HTTP server uses to act on a live run on behalf of the
+// UI: per-agent abort/retry and permission replies. cli/run.ts populates this
+// once it has built a RunContext + OpencodeDriver.
+export interface RunControlSurface {
+  agentControls: Map<string, { abort: () => Promise<void>; retry: () => Promise<void>; ended: boolean }>;
+  replyPermission: (
+    requestID: string,
+    reply: "once" | "always" | "reject",
+  ) => Promise<{ ok: boolean; error?: string }>;
+}
+
 export interface RunningServer {
   bus: EventBus;
   hub: WsHub;
   server: Server<{ runId: string; unsub?: () => void }>;
   url: string;
-  registerAbort: (runId: string, fn: () => Promise<void>) => () => void;
+  registerRun: (runId: string, surface: RunControlSurface) => () => void;
   close: () => void;
 }
 
@@ -394,7 +405,7 @@ export async function startHttpServer(
   const hub = new WsHub();
   hub.attach(bus);
   const index = new RunIndex(opts.runsDir);
-  const aborts = new Map<string, Set<() => Promise<void>>>();
+  const runs = new Map<string, RunControlSurface>();
   const webDist = opts.webDistDir ?? resolveDefaultWebDist();
 
   type Sock = ServerWebSocket<{ runId: string; unsub?: () => void }>;
@@ -474,19 +485,64 @@ export async function startHttpServer(
           });
       },
       async message(ws: Sock, message: string | Uint8Array) {
-        let payload: { type?: string; agentId?: string };
+        let payload: {
+          type?: string;
+          agentId?: string;
+          requestID?: string;
+          reply?: "once" | "always" | "reject";
+          replyTo?: string;
+        };
         try {
           payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
         } catch {
           return;
         }
+        const surface = runs.get(ws.data.runId);
+        // Helper for ack/error responses keyed by replyTo (a UI-supplied
+        // correlation id). The UI doesn't strictly need this today but it
+        // costs nothing and the permission-reply path is the natural first
+        // consumer once the UI wants to disable a button until ack.
+        const respond = (body: Record<string, unknown>): void => {
+          if (payload.replyTo) body.replyTo = payload.replyTo;
+          try { ws.send(JSON.stringify(body)); } catch { /* ignore */ }
+        };
         if (payload.type === "abort") {
-          const set = aborts.get(ws.data.runId);
-          if (set) {
-            for (const fn of set) {
-              try { await fn(); } catch {/* ignore */}
+          // Global abort: aborts every still-running agent in this run.
+          if (surface) {
+            for (const ctrl of surface.agentControls.values()) {
+              if (!ctrl.ended) {
+                try { await ctrl.abort(); } catch { /* best effort */ }
+              }
             }
           }
+          respond({ type: "abort.ack" });
+        } else if (payload.type === "abort-agent" && payload.agentId) {
+          const ctrl = surface?.agentControls.get(payload.agentId);
+          if (ctrl && !ctrl.ended) {
+            try { await ctrl.abort(); } catch { /* best effort */ }
+            respond({ type: "abort-agent.ack", agentId: payload.agentId });
+          } else {
+            respond({ type: "abort-agent.error", agentId: payload.agentId, error: ctrl ? "already ended" : "unknown agent" });
+          }
+        } else if (payload.type === "retry-agent" && payload.agentId) {
+          const ctrl = surface?.agentControls.get(payload.agentId);
+          if (ctrl) {
+            try { await ctrl.retry(); } catch (err) {
+              respond({ type: "retry-agent.error", agentId: payload.agentId, error: (err as Error).message });
+              return;
+            }
+            respond({ type: "retry-agent.ack", agentId: payload.agentId });
+          } else {
+            respond({ type: "retry-agent.error", agentId: payload.agentId, error: "unknown agent" });
+          }
+        } else if (payload.type === "permission-reply" && payload.requestID && payload.reply) {
+          if (!surface) {
+            respond({ type: "permission-reply.error", requestID: payload.requestID, error: "run not active" });
+            return;
+          }
+          const r = await surface.replyPermission(payload.requestID, payload.reply);
+          if (r.ok) respond({ type: "permission-reply.ack", requestID: payload.requestID });
+          else respond({ type: "permission-reply.error", requestID: payload.requestID, error: r.error ?? "unknown error" });
         }
       },
       close(ws: Sock) {
@@ -500,11 +556,11 @@ export async function startHttpServer(
     hub,
     server,
     url: `http://${server.hostname}:${server.port}`,
-    registerAbort: (runId, fn) => {
-      let set = aborts.get(runId);
-      if (!set) { set = new Set(); aborts.set(runId, set); }
-      set.add(fn);
-      return () => set!.delete(fn);
+    registerRun: (runId, surface) => {
+      runs.set(runId, surface);
+      return () => {
+        if (runs.get(runId) === surface) runs.delete(runId);
+      };
     },
     close: () => {
       hub.detach();

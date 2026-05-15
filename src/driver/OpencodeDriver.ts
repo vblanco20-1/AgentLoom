@@ -34,6 +34,23 @@ export class OpencodeDriver {
     return runPrompt(server, req);
   }
 
+  // Forward a UI permission decision to the WorktreeServer that owns the
+  // session. We don't know which cwd issued the requestID, so try every
+  // booted server until one accepts. opencode's POST returns 404 if the
+  // request isn't on that worker, which lets us iterate cheaply.
+  async replyPermission(
+    requestID: string,
+    reply: "once" | "always" | "reject",
+  ): Promise<{ ok: boolean; error?: string }> {
+    let lastErr = "no booted worktree servers";
+    for (const server of this.servers.values()) {
+      const r = await server.replyPermission(requestID, reply);
+      if (r.ok) return r;
+      lastErr = r.error ?? lastErr;
+    }
+    return { ok: false, error: lastErr };
+  }
+
   async shutdown(): Promise<void> {
     if (this.shutdownDone) return;
     this.shutdownDone = true;

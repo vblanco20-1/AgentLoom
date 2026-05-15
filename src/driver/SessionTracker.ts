@@ -83,6 +83,12 @@ export class SessionTracker {
   private endReason: EndReason | null = null;
   private endMessage = "";
   private cb: TrackerCallbacks;
+  // Single resolver fired by EVERY terminal transition — session.idle,
+  // session.error, markAbort, markTimeout, markInternal. Awaiters block on
+  // whenDone(); they would otherwise hang if the tracker is closed by
+  // something other than an opencode event (e.g. our outer timer firing).
+  private donePromise: Promise<void>;
+  private resolveDone!: () => void;
 
   constructor(
     sessionID: string,
@@ -92,6 +98,11 @@ export class SessionTracker {
     this.sessionID = sessionID;
     this.messageID = messageID;
     this.cb = cb;
+    this.donePromise = new Promise<void>((r) => { this.resolveDone = r; });
+  }
+
+  whenDone(): Promise<void> {
+    return this.donePromise;
   }
 
   isDone(): boolean {
@@ -113,6 +124,32 @@ export class SessionTracker {
       .join("");
   }
 
+  // Text emitted AFTER the last tool call — i.e. the model's final reply
+  // once tool round-trips have settled. In multi-step agents `finalText()`
+  // also includes planning prose and tool-input echoes (e.g. "I'll read
+  // with {\"file\": \"x.json\"}"), and those balanced `{...}` snippets get
+  // picked up by extractJson as JSON candidates, sometimes beating the real
+  // answer. Restricting JSON extraction to this slice avoids that whole
+  // class of false positives.
+  //
+  // Falls back to the empty string if there were no tool calls — callers
+  // should detect that and use finalText() instead, so simple agents that
+  // just spit out JSON keep working bit-identically.
+  finalAnswerText(): string {
+    let maxToolOrdinal = 0;
+    let sawTool = false;
+    for (const tc of this.toolCalls.values()) {
+      sawTool = true;
+      if (tc.ordinal > maxToolOrdinal) maxToolOrdinal = tc.ordinal;
+    }
+    if (!sawTool) return "";
+    return [...this.textParts.values()]
+      .filter((p) => p.ordinal > maxToolOrdinal)
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((p) => p.text)
+      .join("");
+  }
+
   finalReasoning(): string {
     return [...this.reasoningParts.values()]
       .sort((a, b) => a.ordinal - b.ordinal)
@@ -124,12 +161,14 @@ export class SessionTracker {
     if (this.done) return;
     this.done = true;
     this.endReason = "abort";
+    this.resolveDone();
   }
 
   markTimeout(): void {
     if (this.done) return;
     this.done = true;
     this.endReason = "timeout";
+    this.resolveDone();
   }
 
   markInternal(msg: string): void {
@@ -137,6 +176,7 @@ export class SessionTracker {
     this.done = true;
     this.endReason = "internal";
     this.endMessage = msg;
+    this.resolveDone();
   }
 
   handle(ev: Event): void {
@@ -274,6 +314,7 @@ export class SessionTracker {
           this.done = true;
           this.endReason = "idle";
           this.cb.onSessionIdle();
+          this.resolveDone();
           break;
         }
         case "session.error": {
@@ -288,6 +329,7 @@ export class SessionTracker {
           this.endReason = "error";
           this.endMessage = msg;
           this.cb.onSessionError(msg);
+          this.resolveDone();
           break;
         }
         default:
