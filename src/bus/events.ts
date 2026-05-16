@@ -15,7 +15,8 @@ export type RunnerEvent =
   | { kind: "workflow.end"; runId: string; ok: boolean; result?: unknown; error?: { message: string; stack?: string }; t: number }
   | { kind: "workflow.log"; runId: string; msg: string; meta?: unknown; t: number }
   | { kind: "phase.mark"; runId: string; title: string; t: number }
-  | { kind: "agent.start"; runId: string; agentId: string; label?: string; phase?: string; cwd: string; prompt: string; schemaHash?: string; t: number }
+  | { kind: "memory.set"; runId: string; path: string | null; t: number }
+  | { kind: "agent.start"; runId: string; agentId: string; label?: string; phase?: string; cwd: string; prompt: string; schemaHash?: string; memoryPath?: string; t: number }
   | { kind: "agent.session"; runId: string; agentId: string; sessionID: string; messageID: string; t: number }
   | { kind: "agent.token"; runId: string; agentId: string; partID: string; ordinal: number; delta: string; t: number }
   | { kind: "agent.reasoning"; runId: string; agentId: string; partID: string; ordinal: number; delta: string; t: number }

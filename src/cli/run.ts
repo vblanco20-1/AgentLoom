@@ -10,6 +10,7 @@ import { makeAgentPrimitive } from "../primitives/agent.ts";
 import { pipelineImpl } from "../primitives/pipeline.ts";
 import { parallelImpl } from "../primitives/parallel.ts";
 import { makePhasePrimitive } from "../primitives/phase.ts";
+import { makeMemoryPrimitive } from "../primitives/memory.ts";
 import { makeLogPrimitive } from "../primitives/log.ts";
 import { RunStore } from "../runs/RunStore.ts";
 import { startHttpServer } from "../server/http.ts";
@@ -92,6 +93,7 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const ctx = makeRunContext({ runId, bus, driver, config: cfg });
   const agent = makeAgentPrimitive(ctx);
   const phase = makePhasePrimitive(ctx);
+  const memory = makeMemoryPrimitive(ctx);
   const log = makeLogPrimitive(ctx);
 
   let httpServer: Awaited<ReturnType<typeof startHttpServer>> | null = null;
@@ -165,6 +167,7 @@ export async function runCli(opts: RunOptions): Promise<number> {
     pipeline: pipelineImpl as unknown as (items: unknown[], ...stages: Array<(...args: unknown[]) => unknown>) => Promise<unknown[]>,
     parallel: parallelImpl as unknown as (thunks: Array<() => unknown>) => Promise<unknown[]>,
     phase,
+    memory,
     log,
     args: inputArgs,
   });

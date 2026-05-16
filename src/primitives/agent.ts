@@ -3,6 +3,7 @@ import type { AgentControl, RunContext } from "./runtime.ts";
 import { poolForCwd } from "./runtime.ts";
 import { uuid } from "../util/uuid.ts";
 import { nowMs } from "../bus/events.ts";
+import { buildMemoryPrefix, ensureMemoryFile, resolveMemoryPath } from "../util/memoryFile.ts";
 
 export interface AgentOptions {
   label?: string;
@@ -16,6 +17,10 @@ export interface AgentOptions {
   // Override the runner-level default for how many times we feed a schema
   // error back to the AI before declaring the agent dead.
   maxSchemaRetries?: number;
+  // Per-call shared-memory override. A string path overrides whatever
+  // memory(path) set at the run level; `false` (or "") disables memory
+  // for this call only. Omit to inherit the active run-level binding.
+  memory?: string | false;
 }
 
 // Permissive default schema applied to every agent() call that doesn't
@@ -37,6 +42,22 @@ export function makeAgentPrimitive(ctx: RunContext) {
     const schema: JSONSchema = opts.schema ?? DEFAULT_SCHEMA;
     const sHash = schemaHash(schema);
     const tStart = nowMs();
+
+    // Resolve effective memory binding for this call. Precedence:
+    //   1. opts.memory === false  → no memory for this call
+    //   2. opts.memory === string → use that path (override)
+    //   3. ctx.activeMemory       → inherit run-level binding
+    //   4. otherwise              → no memory
+    let memoryAbs: string | null = null;
+    if (opts.memory === false || opts.memory === "") {
+      memoryAbs = null;
+    } else if (typeof opts.memory === "string") {
+      memoryAbs = resolveMemoryPath(opts.memory, cwd);
+    } else if (ctx.activeMemory) {
+      memoryAbs = resolveMemoryPath(ctx.activeMemory, cwd);
+    }
+    if (memoryAbs) await ensureMemoryFile(memoryAbs);
+    const finalPrompt = memoryAbs ? `${buildMemoryPrefix(memoryAbs)}${prompt}` : prompt;
     // Register a control slot before we emit agent.start so the UI never
     // sees an agent it can't interact with. The slot's abort is a no-op
     // until the handle is created; retry is wired up right away.
@@ -62,6 +83,7 @@ export function makeAgentPrimitive(ctx: RunContext) {
       cwd,
       prompt,
       schemaHash: sHash,
+      memoryPath: memoryAbs ?? undefined,
       t: tStart,
     });
 
@@ -73,7 +95,7 @@ export function makeAgentPrimitive(ctx: RunContext) {
     try {
       const maxSchemaRetries = opts.maxSchemaRetries ?? ctx.config.maxSchemaRetries;
       const handle = await ctx.driver.run(cwd, {
-        prompt,
+        prompt: finalPrompt,
         schema,
         model: opts.model ?? ctx.config.defaultModel ?? undefined,
         agent: opts.agent ?? ctx.config.defaultAgent ?? undefined,

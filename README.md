@@ -5,9 +5,11 @@ internal orchestrator that ported Bun from Zig to Rust. Uses
 [opencode](https://opencode.ai) as the per-agent backend and ships a live web
 UI streaming every running agent's tokens and tool calls.
 
+
 ## Status
 
 Pre-release. v0.1 — see [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) for the milestone matrix.
+Completely vibecoded and not meant for real usage
 
 ## Documentation
 
@@ -63,4 +65,4 @@ only**. Do not feed untrusted scripts.
 
 ## Licence
 
-MIT.
+AGPL.

@@ -10,6 +10,7 @@ export interface WorkflowGlobals {
   pipeline: (items: unknown[], ...stages: Array<(...args: unknown[]) => unknown>) => Promise<unknown[]>;
   parallel: (thunks: Array<() => unknown>) => Promise<unknown[]>;
   phase: (title: string) => void;
+  memory: (path?: string | null) => string | null;
   log: (msg: string, meta?: unknown) => void;
   args: unknown;
 }
@@ -43,6 +44,7 @@ export async function runWorkflow(
       "pipeline",
       "parallel",
       "phase",
+      "memory",
       "log",
       "args",
       wf.source,
@@ -58,6 +60,7 @@ export async function runWorkflow(
       globals.pipeline,
       globals.parallel,
       globals.phase,
+      globals.memory,
       globals.log,
       globals.args,
     );

@@ -28,6 +28,10 @@ export interface RunContext {
   // Per-agent control surface keyed by agentId. The HTTP/WS layer reads this
   // to route "abort-agent" and "retry-agent" messages from the UI.
   agentControls: Map<string, AgentControl>;
+  // Active shared-memory file for subsequent agent() calls. Set by the
+  // workflow-level memory(path) primitive; null when memory is disabled.
+  // Per-call agent({ memory }) overrides this without mutating it.
+  activeMemory: string | null;
 }
 
 export function makeRunContext(args: {
@@ -45,6 +49,7 @@ export function makeRunContext(args: {
     perWorktreePool: new Map(),
     activeAborts: new Set(),
     agentControls: new Map(),
+    activeMemory: null,
   };
 }
 

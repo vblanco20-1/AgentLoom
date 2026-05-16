@@ -19,9 +19,10 @@ state, and this is what you read to actually use the thing.
    - 5.3 [`pipeline(items, ...stages)`](#53-pipelineitems-stages)
    - 5.4 [`parallel(thunks)`](#54-parallelthunks)
    - 5.5 [`phase(title)`](#55-phasetitle)
-   - 5.6 [`log(msg, meta?)`](#56-logmsg-meta)
-   - 5.7 [`args`](#57-args)
-   - 5.8 [JSON Schema conventions](#58-json-schema-conventions)
+   - 5.6 [`memory(path)`](#56-memorypath)
+   - 5.7 [`log(msg, meta?)`](#57-logmsg-meta)
+   - 5.8 [`args`](#58-args)
+   - 5.9 [JSON Schema conventions](#59-json-schema-conventions)
 6. [CLI reference](#6-cli-reference)
 7. [Configuration](#7-configuration)
 8. [Web UI](#8-web-ui)
@@ -45,7 +46,7 @@ Each sub-agent is a real Claude Code-equivalent agent provided by
 `Grep`, etc.
 
 The API surface is identical to the (undocumented, internal) JavaScript
-orchestrator used to port the Bun JavaScript runtime from Zig to Rust. Six
+orchestrator used to port the Bun JavaScript runtime from Zig to Rust. Seven
 globals are injected into every workflow:
 
 | Global | Purpose |
@@ -54,6 +55,7 @@ globals are injected into every workflow:
 | `pipeline(items, ...stages)` | Per-item streaming pipeline. |
 | `parallel(thunks)` | Concurrent fan-out. |
 | `phase(title)` | Telemetry marker. |
+| `memory(path)` | Bind a shared notes file that subsequent agents read + append. |
 | `log(msg, meta?)` | Log line. |
 | `args` | Frozen input object. |
 
@@ -277,12 +279,13 @@ Spawn one sub-agent. Returns `Promise<unknown>`:
 |---|---|---|---|
 | `label` | `string` | — | Identifier shown on the UI card and in logs. Convention: `verb:scope`, e.g. `"verify:bun_string/parser"`. |
 | `phase` | `string` | — | Phase tag; should match a `meta.phases[].title`. |
-| `schema` | JSON Schema | — | Validates the agent's output. See [§5.8](#58-json-schema-conventions). |
+| `schema` | JSON Schema | — | Validates the agent's output. See [§5.9](#59-json-schema-conventions). |
 | `model` | `{ providerID, modelID }` | `config.defaultModel` | Override the model for this call. |
 | `agent` | `string` | `config.defaultAgent` | opencode agent profile name (`build`, `general`, etc.). |
 | `tools` | `Record<string, boolean>` | — | Per-call tool allowlist (`{ read: true, edit: false, bash: false }`). Omit for the agent profile's default surface. |
 | `cwd` | `string` | `config.defaultCwd` | Working directory. New cwds boot a new opencode server. |
 | `timeoutMs` | `number` | `config.agentTimeoutMs` | Per-call deadline; on timeout the session is aborted and `null` returned. |
+| `memory` | `string \| false` | inherits `memory()` | Per-call shared-memory override. String = use this path; `false` = disable for this call. See [§5.6](#56-memorypath). |
 
 #### Failure reasons
 
@@ -451,7 +454,50 @@ const fixes = await pipeline(/* … */);
 can use either, both, or neither. Both feed the same logical-phase
 aggregation in the UI.
 
-### 5.6 `log(msg, meta?)`
+### 5.6 `memory(path)`
+
+Bind a shared "scratchpad" file that every subsequent `agent()` call is
+instructed to read before working and append findings to afterwards. The
+runner never reads or parses the file itself — it just guarantees the file
+exists (creating parent directories if needed, never truncating) and
+injects a `SHARED MEMORY` block at the top of the agent's prompt that
+prescribes the read-before / append-after protocol.
+
+```js
+phase("Survey");
+memory("notes/survey.md");
+const findings = await agent("Audit src/ for X.", { label: "audit", schema: AUDIT });
+
+phase("Fix");
+memory("notes/fix.md");                 // distinct file for the new phase
+await parallel(items.map(it => () =>
+  agent(`Apply finding ${it.id}.`, { label: `fix:${it.id}`, schema: FIX }),
+));
+
+memory(null);                            // disable for any later agents
+```
+
+- `path` is the file the agents share. Absolute paths pass through;
+  relative paths are resolved against the **agent's `cwd` at call time**,
+  so the same workflow can target multiple worktrees and each agent sees
+  a worktree-local file.
+- Pass `null` (or omit / empty string) to clear the binding.
+- The binding lasts until you change it. There's no nesting / push-pop —
+  set per phase as appropriate.
+- Per-call override: `agent("...", { memory: "alt.md" })` overrides the
+  active binding for one call; `{ memory: false }` disables it for one call.
+- Concurrency caveat: parallel agents sharing one file can race on writes.
+  The instructed protocol is append-only, which mitigates loss but cannot
+  prevent it on simultaneous edits. For strictly-isolated parallel memory,
+  give each branch its own file via the per-call override.
+- The file lives in the worktree by default, so opencode's `Read`/`Edit`
+  tools work on it directly — and changes are visible to subsequent
+  agents even though each runs in a fresh opencode session.
+- Emits a `memory.set` event whenever the binding changes; each
+  `agent.start` event also carries an optional `memoryPath` so the UI /
+  NDJSON show which agents saw memory.
+
+### 5.7 `log(msg, meta?)`
 
 A `console.log`-style stream marker emitted as a `workflow.log` event.
 
@@ -464,7 +510,7 @@ log("dispatching round 2", { round: 2, files: FILES.length });
 - `meta` is optional and stored on the event; surfaced in the WS stream
   and NDJSON. The UI's developer console shows it under `[log]`.
 
-### 5.7 `args`
+### 5.8 `args`
 
 `Object.freeze`d input payload, sourced (in this priority order):
 
@@ -484,7 +530,7 @@ const FILES = (A.files || []).slice(0, A.maxBatch ?? 100);
 if (FILES.length === 0) return { error: "no files in args.files" };
 ```
 
-### 5.8 JSON Schema conventions
+### 5.9 JSON Schema conventions
 
 `schema` accepts a subset of JSON Schema (everything in the Bun corpus
 plus a bit more, via Ajv with `strict: false`, `allowUnionTypes: true`):
@@ -1101,6 +1147,7 @@ import { makeAgentPrimitive } from "./agent_runner/src/primitives/agent";
 import { pipelineImpl } from "./agent_runner/src/primitives/pipeline";
 import { parallelImpl } from "./agent_runner/src/primitives/parallel";
 import { makePhasePrimitive } from "./agent_runner/src/primitives/phase";
+import { makeMemoryPrimitive } from "./agent_runner/src/primitives/memory";
 import { makeLogPrimitive } from "./agent_runner/src/primitives/log";
 import { resolveConfig } from "./agent_runner/src/config/defaults";
 import { uuid } from "./agent_runner/src/util/uuid";
@@ -1118,6 +1165,7 @@ const res = await runWorkflow(wf, {
   pipeline: pipelineImpl,
   parallel: parallelImpl,
   phase: makePhasePrimitive(ctx),
+  memory: makeMemoryPrimitive(ctx),
   log: makeLogPrimitive(ctx),
   args: { /* ... */ },
 });
@@ -1230,6 +1278,7 @@ end up on disk in `.runner/runs/`. Consider:
 | **Sub-agent** | One opencode session spawned by `agent()`. Has full Claude Code tool surface. |
 | **Pipeline** | Per-item, streaming, multi-stage orchestration via `pipeline()`. |
 | **Phase** | A logical chunk of the workflow declared in `meta.phases` and marked at runtime by `phase("...")`. Distinct from `agent({ phase })` which tags individual sub-agents. |
+| **Shared memory** | A workflow-bound notes file (`memory(path)`) that subsequent agents read first and append findings to — file-backed scratchpad letting agents communicate across stages without conversational context. |
 | **2-vote** | Adversarial pattern: same prompt run by two independent agents, only proceeding when both agree. |
 | **Driver script** | An external script (e.g. `scripts/port-batch.ts`) that produces JSON `args` on stdout, piped into the runner. |
 | **Worktree server** | One opencode server process per unique `cwd`. |
