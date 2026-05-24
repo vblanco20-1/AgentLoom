@@ -64,6 +64,8 @@ function makeStubCtx(cwd: string) {
     activeAborts: new Set(),
     agentControls: new Map(),
     activeMemory: null,
+    runnerTools: new Map(),
+    runnerToolsLocked: false,
   };
 
   return { ctx, bus, events, calls };

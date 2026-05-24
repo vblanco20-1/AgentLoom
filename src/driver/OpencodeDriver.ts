@@ -6,9 +6,20 @@ export class OpencodeDriver {
   private servers = new Map<string, WorktreeServer>();
   private cfg: ResolvedRunnerConfig;
   private shutdownDone = false;
+  // Additional MCP entries to merge into config.mcp before opencode boots.
+  // Used to inject the in-process RunnerToolServer (workflow-defined tools)
+  // alongside any user-configured MCP servers.
+  private extraMcp: Record<string, unknown> = {};
 
   constructor(cfg: ResolvedRunnerConfig) {
     this.cfg = cfg;
+  }
+
+  // Add an MCP server entry that will be merged into config.mcp at boot
+  // time for every worktree opencode instance. Must be called BEFORE the
+  // first run() — already-booted servers don't re-read this.
+  addMcpServer(name: string, entry: unknown): void {
+    this.extraMcp[name] = entry;
   }
 
   private async getServer(cwd: string): Promise<WorktreeServer> {
@@ -17,12 +28,16 @@ export class OpencodeDriver {
       await existing.boot();
       return existing;
     }
+    const mergedMcp: Record<string, unknown> = {
+      ...(this.cfg.mcp ?? {}),
+      ...this.extraMcp,
+    };
     const server = new WorktreeServer({
       cwd,
       hostname: this.cfg.opencode.hostname,
       bootTimeoutMs: this.cfg.opencode.bootTimeoutMs,
       extraConfig: this.cfg.opencode.extraConfig,
-      mcp: this.cfg.mcp,
+      mcp: mergedMcp,
     });
     this.servers.set(cwd, server);
     await server.boot();

@@ -27,6 +27,12 @@ export interface PromptRequest {
   // trip to the model. `attempt` is 1-based and counts the retry that's
   // about to happen (1 = first retry after the initial response).
   onSchemaRetry?: (attempt: number, error: string) => void;
+  // Fired immediately before each user message is sent to opencode — the
+  // initial attempt (req.prompt + schema description) AND every retry
+  // (buildRetryPrompt). `text` is the exact bytes opencode receives, so the
+  // per-agent log can reconstruct what the model actually saw rather than
+  // what the workflow author wrote.
+  onUserPrompt?: (attempt: number, text: string) => void;
 }
 
 export type PromptResult =
@@ -93,6 +99,7 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
       if (attempt > 0) {
         req.onSchemaRetry?.(attempt, lastSchemaError);
       }
+      req.onUserPrompt?.(attempt, text);
 
       tracker = new SessionTracker(sessionID!, messageID, {
         onTokenDelta: req.onTokenDelta,

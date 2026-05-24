@@ -16,6 +16,24 @@ export interface AgentControl {
   ended: boolean;
 }
 
+// A workflow-registered tool. defineTool() stores these on the RunContext.
+// The runner exposes them to opencode via an in-process MCP HTTP server;
+// when the sub-agent invokes the tool, the server routes the call to the
+// `handler` closure here, which runs in the same Bun process as the
+// workflow.
+export interface RunnerToolDef {
+  name: string;
+  description: string;
+  // JSON Schema for the tool input (must be { type: "object", ... }).
+  // We pass this through to MCP's tools/list verbatim so the model sees
+  // whatever the workflow author wrote.
+  inputSchema: { type: "object"; properties?: Record<string, unknown>; required?: string[]; [k: string]: unknown };
+  // The JS callback. Receives the validated tool input; returns either an
+  // arbitrary JSON-serialisable value (which becomes the tool's text
+  // content) or an explicit { content, isError? } MCP result.
+  handler: (input: Record<string, unknown>) => unknown | Promise<unknown>;
+}
+
 export interface RunContext {
   runId: string;
   bus: EventBus;
@@ -32,6 +50,15 @@ export interface RunContext {
   // workflow-level memory(path) primitive; null when memory is disabled.
   // Per-call agent({ memory }) overrides this without mutating it.
   activeMemory: string | null;
+  // Workflow-registered tools. Mutated by defineTool() during workflow
+  // execution; consulted by the in-process MCP server when opencode asks
+  // for tools/list or tools/call.
+  runnerTools: Map<string, RunnerToolDef>;
+  // Locked once the first agent() launches. opencode's mcp/list is fetched
+  // when the worktree server boots; tools added after that point are not
+  // visible to the sub-agent. defineTool() raises a workflow.log warning
+  // when called past this point.
+  runnerToolsLocked: boolean;
 }
 
 export function makeRunContext(args: {
@@ -50,6 +77,8 @@ export function makeRunContext(args: {
     activeAborts: new Set(),
     agentControls: new Map(),
     activeMemory: null,
+    runnerTools: new Map(),
+    runnerToolsLocked: false,
   };
 }
 

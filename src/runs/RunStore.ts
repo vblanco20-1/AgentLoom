@@ -7,6 +7,26 @@ const FLUSH_INTERVAL_MS = 100;
 const FLUSH_BYTES = 4 * 1024;
 const FLUSH_EVENTS = 64;
 
+// Incremental streaming events would balloon events.ndjson into tens of MB
+// per run. The fully assembled assistant text is already captured in
+// `agent.end.rawText`, and tool calls have their own dedicated start/result
+// events, so dropping the deltas costs no information for post-mortem reads.
+// The live bus still broadcasts everything, so the web UI keeps streaming.
+const SKIP_KINDS: ReadonlySet<string> = new Set([
+  "agent.token",
+  "agent.reasoning",
+]);
+const SKIP_RAW_EV_TYPES: ReadonlySet<string> = new Set([
+  "message.part.delta",
+  "message.part.updated",
+]);
+
+export function isIncrementalEvent(ev: RunnerEvent): boolean {
+  if (SKIP_KINDS.has(ev.kind)) return true;
+  if (ev.kind === "agent.raw" && SKIP_RAW_EV_TYPES.has(ev.evType)) return true;
+  return false;
+}
+
 export class RunStore {
   private dir: string;
   private eventsPath: string;
@@ -39,6 +59,7 @@ export class RunStore {
 
   private write(ev: RunnerEvent): void {
     if (this.closed) return;
+    if (isIncrementalEvent(ev)) return;
     const line = JSON.stringify(ev) + "\n";
     this.buf.push(line);
     this.bufBytes += line.length;

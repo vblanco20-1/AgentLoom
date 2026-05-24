@@ -74,6 +74,12 @@ export function makeAgentPrimitive(ctx: RunContext) {
       ended: false,
     };
     ctx.agentControls.set(agentId, control);
+    // First agent() launch freezes the workflow-registered tool list as far
+    // as the sub-agent is concerned. opencode reads tools/list at
+    // worktree-server boot and caches the result; tools registered past
+    // this point never reach the model — defineTool emits a workflow.log
+    // warning when this flag is set.
+    ctx.runnerToolsLocked = true;
     ctx.bus.emit({
       kind: "agent.start",
       runId: ctx.runId,
@@ -157,6 +163,16 @@ export function makeAgentPrimitive(ctx: RunContext) {
             output: call.output,
             error: call.error,
             elapsedMs: (call.endMs ?? Date.now()) - call.startMs,
+            t: nowMs(),
+          });
+        },
+        onUserPrompt: (attempt, text) => {
+          ctx.bus.emit({
+            kind: "agent.userPrompt",
+            runId: ctx.runId,
+            agentId,
+            attempt,
+            text,
             t: nowMs(),
           });
         },

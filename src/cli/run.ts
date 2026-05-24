@@ -5,6 +5,7 @@ import { resolveConfig } from "../config/defaults.ts";
 import { loadWorkflow, runWorkflow } from "../workflow/vm.ts";
 import { EventBus } from "../bus/EventBus.ts";
 import { OpencodeDriver } from "../driver/OpencodeDriver.ts";
+import { startRunnerToolServer, type RunnerToolServerHandle } from "../driver/RunnerToolServer.ts";
 import { makeRunContext } from "../primitives/runtime.ts";
 import { makeAgentPrimitive } from "../primitives/agent.ts";
 import { pipelineImpl } from "../primitives/pipeline.ts";
@@ -12,7 +13,9 @@ import { parallelImpl } from "../primitives/parallel.ts";
 import { makePhasePrimitive } from "../primitives/phase.ts";
 import { makeMemoryPrimitive } from "../primitives/memory.ts";
 import { makeLogPrimitive } from "../primitives/log.ts";
-import { RunStore } from "../runs/RunStore.ts";
+import { makeDefineToolPrimitive } from "../primitives/tool.ts";
+import { RunStore, isIncrementalEvent } from "../runs/RunStore.ts";
+import { AgentLogStore } from "../runs/AgentLogStore.ts";
 import { startHttpServer } from "../server/http.ts";
 import { uuid } from "../util/uuid.ts";
 import { nowMs } from "../bus/events.ts";
@@ -52,7 +55,12 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const labels = new Map<string, string>();
   const reasoningBuf = new Map<string, string>();
   bus.on((ev) => {
-    process.stdout.write(JSON.stringify(ev) + "\n");
+    // Skip incremental streaming deltas — same predicate the run-log uses.
+    // Stdout would otherwise dump one JSON line per token, drowning the
+    // useful per-agent summary printed at agent.end below.
+    if (!isIncrementalEvent(ev)) {
+      process.stdout.write(JSON.stringify(ev) + "\n");
+    }
     if (ev.kind === "agent.start") {
       labels.set(ev.agentId, ev.label ?? ev.agentId.slice(0, 8));
       reasoningBuf.set(ev.agentId, "");
@@ -76,6 +84,14 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const store = new RunStore(cfg.runsDir, runId);
   await store.open();
   store.attach(bus);
+
+  // Per-agent XML chat logs sit alongside the run-wide events.ndjson so each
+  // agent() call can be reviewed as a single readable conversation (prompt,
+  // reasoning, assistant text, tool input + output, retries, final result).
+  const agentLogs = new AgentLogStore(cfg.runsDir, runId);
+  await agentLogs.open();
+  agentLogs.attach(bus);
+
   await store.writeMeta({
     runId,
     workflowPath: wf.path,
@@ -95,6 +111,19 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const phase = makePhasePrimitive(ctx);
   const memory = makeMemoryPrimitive(ctx);
   const log = makeLogPrimitive(ctx);
+  const defineTool = makeDefineToolPrimitive(ctx);
+
+  // In-process MCP server that exposes workflow-registered tools to the
+  // sub-agent. Boot first so we know the URL before opencode is asked to
+  // connect to it. Listed under a reserved name (`__runner__`) in the
+  // mcp config block to avoid collisions with user-defined MCP entries.
+  let runnerToolServer: RunnerToolServerHandle | null = null;
+  runnerToolServer = await startRunnerToolServer(ctx);
+  driver.addMcpServer("__runner__", {
+    type: "remote",
+    url: runnerToolServer.url,
+    enabled: true,
+  });
 
   let httpServer: Awaited<ReturnType<typeof startHttpServer>> | null = null;
   let unregisterRun: (() => void) | null = null;
@@ -150,6 +179,10 @@ export async function runCli(opts: RunOptions): Promise<number> {
       try { httpServer.close(); } catch { /* ignore */ }
     }
     try { await store.close(); } catch { /* ignore */ }
+    try { await agentLogs.close(); } catch { /* ignore */ }
+    if (runnerToolServer) {
+      try { await runnerToolServer.close(); } catch { /* ignore */ }
+    }
     // 130 is the conventional exit code for SIGINT.
     process.exit(sig === "SIGINT" ? 130 : 143);
   };
@@ -169,6 +202,7 @@ export async function runCli(opts: RunOptions): Promise<number> {
     phase,
     memory,
     log,
+    defineTool,
     args: inputArgs,
   });
 
@@ -196,6 +230,10 @@ export async function runCli(opts: RunOptions): Promise<number> {
 
   await driver.shutdown();
   await store.close();
+  await agentLogs.close();
+  if (runnerToolServer) {
+    try { await runnerToolServer.close(); } catch { /* ignore */ }
+  }
   await RunStore.pruneOld(cfg.runsDir, cfg.retention.maxRuns);
   if (httpServer && !cfg.web.openBrowser && cfg.web.port > 0) {
     // Keep server alive for headless inspection only when explicitly requested.

@@ -12,6 +12,15 @@ export interface WorkflowGlobals {
   phase: (title: string) => void;
   memory: (path?: string | null) => string | null;
   log: (msg: string, meta?: unknown) => void;
+  // defineTool(name, { description, inputSchema }, handler) — register a
+  // workflow-callable tool exposed to sub-agents. Must be called BEFORE
+  // the first agent() invocation; opencode reads tools/list once at
+  // worktree-server boot.
+  defineTool: (
+    name: string,
+    opts: { description: string; inputSchema: { type: "object"; [k: string]: unknown } },
+    handler: (input: Record<string, unknown>) => unknown | Promise<unknown>,
+  ) => void;
   args: unknown;
 }
 
@@ -46,6 +55,7 @@ export async function runWorkflow(
       "phase",
       "memory",
       "log",
+      "defineTool",
       "args",
       wf.source,
     );
@@ -62,6 +72,7 @@ export async function runWorkflow(
       globals.phase,
       globals.memory,
       globals.log,
+      globals.defineTool,
       globals.args,
     );
     return { ok: true, result };
