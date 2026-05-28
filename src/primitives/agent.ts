@@ -2,8 +2,19 @@ import { schemaHash, type JSONSchema } from "../driver/schema.ts";
 import type { AgentControl, RunContext } from "./runtime.ts";
 import { poolForCwd } from "./runtime.ts";
 import { uuid } from "../util/uuid.ts";
-import { nowMs } from "../bus/events.ts";
+import { nowMs, type AgentTokenUsage } from "../bus/events.ts";
 import { buildMemoryPrefix, ensureMemoryFile, resolveMemoryPath } from "../util/memoryFile.ts";
+
+// Reported to the workflow via opts.onMetrics once the agent settles. Lets
+// workflows track how much context they've burned and decide whether to keep
+// pushing more data into a follow-up agent() call.
+export interface AgentMetrics {
+  agentId: string;
+  ok: boolean;
+  reason: string;
+  elapsedMs: number;
+  tokens: AgentTokenUsage;
+}
 
 export interface AgentOptions {
   label?: string;
@@ -21,6 +32,14 @@ export interface AgentOptions {
   // memory(path) set at the run level; `false` (or "") disables memory
   // for this call only. Omit to inherit the active run-level binding.
   memory?: string | false;
+  // Fired once when the agent settles (ok or not) with a rough token
+  // accounting for everything the runner pushed to opencode and got back —
+  // user prompts (including schema retries), assistant text + reasoning,
+  // and tool input args / outputs. Use it to decide whether to keep
+  // feeding more data into a follow-up agent() call before you hit your
+  // model's context window. Never throws; errors in the callback are
+  // swallowed so they can't take the run down.
+  onMetrics?: (m: AgentMetrics) => void;
 }
 
 // Permissive default schema applied to every agent() call that doesn't
@@ -33,6 +52,27 @@ const DEFAULT_SCHEMA: JSONSchema = {
   description:
     "Respond with a JSON object. Use whatever keys make sense for the task.",
 };
+
+// Helper so we never let an exception in the workflow's metrics callback
+// take the run down. The runner's whole contract is that agent() never
+// throws — and that has to extend to anything we hand off to user code.
+function fireMetrics(
+  cb: AgentOptions["onMetrics"],
+  ctx: RunContext,
+  m: AgentMetrics,
+): void {
+  if (!cb) return;
+  try {
+    cb(m);
+  } catch (err) {
+    ctx.bus.emit({
+      kind: "workflow.log",
+      runId: ctx.runId,
+      msg: `agent() onMetrics callback threw: ${(err as Error).message}`,
+      t: nowMs(),
+    });
+  }
+}
 
 export function makeAgentPrimitive(ctx: RunContext) {
   const agentFn = async function agent(prompt: string, opts: AgentOptions = {}): Promise<unknown> {
@@ -226,8 +266,10 @@ export function makeAgentPrimitive(ctx: RunContext) {
           output: r.data,
           rawText: r.rawText,
           elapsedMs: r.elapsedMs,
+          tokens: r.tokens,
           t: nowMs(),
         });
+        fireMetrics(opts.onMetrics, ctx, { agentId, ok: true, reason: "idle", elapsedMs: r.elapsedMs, tokens: r.tokens });
         return r.data;
       }
       ctx.bus.emit({
@@ -239,8 +281,10 @@ export function makeAgentPrimitive(ctx: RunContext) {
         output: undefined,
         rawText: r.rawText,
         elapsedMs: r.elapsedMs,
+        tokens: r.tokens,
         t: nowMs(),
       });
+      fireMetrics(opts.onMetrics, ctx, { agentId, ok: false, reason: r.reason, elapsedMs: r.elapsedMs, tokens: r.tokens });
       if ((r as { message?: string }).message) {
         ctx.bus.emit({
           kind: "workflow.log",

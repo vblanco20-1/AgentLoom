@@ -12,6 +12,12 @@ export interface WorktreeServerOptions {
   bootTimeoutMs: number;
   extraConfig?: Record<string, unknown>;
   mcp?: Record<string, unknown>;
+  // Extra opencode plugin specs (absolute path, file:// URL, or npm
+  // package name). Merged into the worktree's opencode config under
+  // `plugin` at boot time. Used by the runner to inject the auto-
+  // generated plugin file that exposes workflow tools under their bare
+  // names (no MCP server prefix).
+  plugins?: string[];
 }
 
 export class WorktreeServer {
@@ -63,6 +69,9 @@ export class WorktreeServer {
         config: {
           ...(this.opts.extraConfig ?? {}),
           ...(this.opts.mcp ? { mcp: this.opts.mcp as Record<string, unknown> } : {}),
+          ...(this.opts.plugins && this.opts.plugins.length > 0
+            ? { plugin: this.opts.plugins }
+            : {}),
         } as never,
       });
     } finally {

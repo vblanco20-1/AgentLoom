@@ -238,6 +238,71 @@ describe("SessionTracker", () => {
     expect(tokens.join("")).toBe("{\"ok\":true}");
   });
 
+  it("reports rough token stats covering prompts, assistant text, reasoning, and tool I/O", () => {
+    const t = new SessionTracker("sess", "msg_user", {
+      onTokenDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolStart: () => {},
+      onToolResult: () => {},
+      onRawEvent: () => {},
+      onSessionIdle: () => {},
+      onSessionError: () => {},
+    });
+    // Empty up front — nothing pushed in, nothing observed.
+    const empty = t.tokenStats();
+    expect(empty.totalChars).toBe(0);
+    expect(empty.totalTokens).toBe(0);
+
+    // 12-char user prompt → input bucket.
+    t.noteUserPrompt("hello world!");
+    // 5-char assistant text part.
+    t.handle({
+      id: "ev_text",
+      type: "message.part.updated",
+      properties: {
+        sessionID: "sess",
+        time: 1,
+        part: { id: "p1", sessionID: "sess", messageID: "msg_assistant", type: "text", text: "READY" },
+      },
+    } as unknown as Event);
+    // 7-char reasoning part.
+    t.handle({
+      id: "ev_reason",
+      type: "message.part.updated",
+      properties: {
+        sessionID: "sess",
+        time: 2,
+        part: { id: "r1", sessionID: "sess", messageID: "msg_assistant", type: "reasoning", text: "ponders", time: { start: 1 } },
+      },
+    } as unknown as Event);
+    // Tool round-trip — input args 13 chars when JSON-stringified ({"cmd":"ls"}=13),
+    // output "a\nb\n" = 4 chars.
+    t.handle({
+      id: "ev_tool",
+      type: "message.part.updated",
+      properties: {
+        sessionID: "sess",
+        time: 3,
+        part: {
+          id: "p2", sessionID: "sess", messageID: "msg_assistant", type: "tool",
+          callID: "c1", tool: "bash",
+          state: { status: "completed", input: { cmd: "ls" }, output: "a\nb\n", title: "ls", metadata: {}, time: { start: 1, end: 2 } },
+        },
+      },
+    } as unknown as Event);
+
+    const stats = t.tokenStats();
+    // input = user prompt (12) + tool output (4) = 16
+    expect(stats.inputChars).toBe(16);
+    // output = assistant text (5) + reasoning (7) + tool input JSON ({"cmd":"ls"} = 12) = 24
+    expect(stats.outputChars).toBe(24);
+    expect(stats.totalChars).toBe(40);
+    // Rough = ceil(chars / 4)
+    expect(stats.inputTokens).toBe(4);   // ceil(16/4) = 4
+    expect(stats.outputTokens).toBe(6);  // ceil(24/4) = 6
+    expect(stats.totalTokens).toBe(10);  // ceil(40/4) = 10
+  });
+
   it("drops buffered deltas that turn out to belong to the user-prompt echo", () => {
     const tokens: string[] = [];
     const t = new SessionTracker("sess", "msg_user", {

@@ -34,6 +34,10 @@ function makeStubCtx(cwd: string) {
           data: { stub: true },
           rawText: '{"stub":true}',
           elapsedMs: 1,
+          tokens: {
+            inputChars: 0, outputChars: 0, totalChars: 0,
+            inputTokens: 0, outputTokens: 0, totalTokens: 0,
+          },
         }),
       };
     },

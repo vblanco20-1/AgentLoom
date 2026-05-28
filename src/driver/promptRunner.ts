@@ -1,7 +1,9 @@
 import { compileSchema, describeSchemaForPrompt, extractJson, type JSONSchema } from "./schema.ts";
-import { SessionTracker } from "./SessionTracker.ts";
+import { SessionTracker, addTokenStats, emptyTokenStats, type ConversationTokenStats } from "./SessionTracker.ts";
 import { WorktreeServer } from "./WorktreeServer.ts";
 import { ascendingMessageId } from "../util/uuid.ts";
+
+export type { ConversationTokenStats };
 
 export interface PromptRequest {
   prompt: string;
@@ -36,8 +38,8 @@ export interface PromptRequest {
 }
 
 export type PromptResult =
-  | { ok: true; data: unknown; rawText: string; elapsedMs: number }
-  | { ok: false; reason: "schema" | "abort" | "http" | "timeout" | "idle" | "internal"; message?: string; rawText: string; elapsedMs: number };
+  | { ok: true; data: unknown; rawText: string; elapsedMs: number; tokens: ConversationTokenStats }
+  | { ok: false; reason: "schema" | "abort" | "http" | "timeout" | "idle" | "internal"; message?: string; rawText: string; elapsedMs: number; tokens: ConversationTokenStats };
 
 export interface PromptHandle {
   result: Promise<PromptResult>;
@@ -52,6 +54,12 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
   let timer: ReturnType<typeof setTimeout> | null = null;
   const maxRetries = req.maxSchemaRetries ?? 5;
 
+  // Rolling conversation-size totals — a NEW SessionTracker is created per
+  // attempt against the same opencode session, so per-tracker stats reset on
+  // every retry. We accumulate here so the final number reflects everything
+  // sent/received across the whole agent() call.
+  let cumulativeTokens: ConversationTokenStats = emptyTokenStats();
+
   const result = (async (): Promise<PromptResult> => {
     try {
       sessionID = await server.createSession();
@@ -62,6 +70,7 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         message: (err as Error).message,
         rawText: "",
         elapsedMs: Date.now() - t0,
+        tokens: cumulativeTokens,
       };
     }
 
@@ -81,7 +90,7 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (aborted) {
         if (timer) clearTimeout(timer);
-        return { ok: false, reason: "abort", rawText: lastRawText, elapsedMs: Date.now() - t0 };
+        return { ok: false, reason: "abort", rawText: lastRawText, elapsedMs: Date.now() - t0, tokens: cumulativeTokens };
       }
 
       // Use ascendingMessageId() (not random UUID hex) so the user
@@ -110,6 +119,10 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         onSessionIdle: () => {},
         onSessionError: () => {},
       });
+      // Tell the per-attempt tracker about the exact bytes we're sending so
+      // tokenStats() can include them on the input side once the attempt
+      // settles.
+      tracker.noteUserPrompt(text);
       server.registerTracker(tracker);
 
       try {
@@ -122,13 +135,20 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
         });
       } catch (err) {
         if (timer) clearTimeout(timer);
-        if (tracker) server.unregisterTracker(tracker);
+        if (tracker) {
+          server.unregisterTracker(tracker);
+          // Even on transport failure, fold in whatever the tracker observed
+          // (mostly the user prompt itself) so the caller doesn't see a 0
+          // budget after a partially-sent attempt.
+          cumulativeTokens = addTokenStats(cumulativeTokens, tracker.tokenStats());
+        }
         return {
           ok: false,
           reason: "http",
           message: (err as Error).message,
           rawText: lastRawText,
           elapsedMs: Date.now() - t0,
+          tokens: cumulativeTokens,
         };
       }
 
@@ -144,16 +164,19 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
       const rawText = tracker!.finalText();
       const reason = tracker!.reason();
       lastRawText = rawText;
+      // Fold this attempt's input+output bytes into the running total before
+      // we exit any branch below.
+      cumulativeTokens = addTokenStats(cumulativeTokens, tracker!.tokenStats());
 
       // Hard-fail conditions: don't retry on abort/timeout/transport error.
       if (aborted || reason === "abort") {
         if (timer) clearTimeout(timer);
-        return { ok: false, reason: "abort", rawText, elapsedMs: Date.now() - t0 };
+        return { ok: false, reason: "abort", rawText, elapsedMs: Date.now() - t0, tokens: cumulativeTokens };
       }
       if (reason === "timeout") {
         if (timer) clearTimeout(timer);
         if (sessionID) await server.abortSession(sessionID);
-        return { ok: false, reason: "timeout", rawText, elapsedMs: Date.now() - t0 };
+        return { ok: false, reason: "timeout", rawText, elapsedMs: Date.now() - t0, tokens: cumulativeTokens };
       }
       if (reason === "error") {
         if (timer) clearTimeout(timer);
@@ -163,17 +186,18 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
           message: tracker!.errorMessage(),
           rawText,
           elapsedMs: Date.now() - t0,
+          tokens: cumulativeTokens,
         };
       }
       if (reason !== "idle") {
         if (timer) clearTimeout(timer);
-        return { ok: false, reason: "idle", rawText, elapsedMs: Date.now() - t0 };
+        return { ok: false, reason: "idle", rawText, elapsedMs: Date.now() - t0, tokens: cumulativeTokens };
       }
 
       // No schema → first idle is the final answer; no retries possible.
       if (!req.schema || !compiledValidate) {
         if (timer) clearTimeout(timer);
-        return { ok: true, data: rawText.trim(), rawText, elapsedMs: Date.now() - t0 };
+        return { ok: true, data: rawText.trim(), rawText, elapsedMs: Date.now() - t0, tokens: cumulativeTokens };
       }
 
       // For multi-step agents that called tools, narrow JSON extraction to
@@ -200,7 +224,7 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
       }
 
       if (timer) clearTimeout(timer);
-      return { ok: true, data: v.data, rawText, elapsedMs: Date.now() - t0 };
+      return { ok: true, data: v.data, rawText, elapsedMs: Date.now() - t0, tokens: cumulativeTokens };
     }
 
     // Out of retries — agent is considered dead.
@@ -211,6 +235,7 @@ export function runPrompt(server: WorktreeServer, req: PromptRequest): PromptHan
       message: `exhausted ${maxRetries} schema retries; last error: ${lastSchemaError}`,
       rawText: lastRawText,
       elapsedMs: Date.now() - t0,
+      tokens: cumulativeTokens,
     };
   })();
 

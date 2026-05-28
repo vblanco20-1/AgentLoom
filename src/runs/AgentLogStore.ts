@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import type { EventBus } from "../bus/EventBus.ts";
-import type { RunnerEvent } from "../bus/events.ts";
+import type { AgentTokenUsage, RunnerEvent } from "../bus/events.ts";
 
 // Per-agent XML log. One file per agent() call lands under
 //   <runsDir>/<runId>/agents/<agentId>.xml
@@ -70,6 +70,7 @@ interface AgentState {
     output?: unknown;
     rawText?: string;
     endedAt: number;
+    tokens?: AgentTokenUsage;
   };
 }
 
@@ -206,6 +207,7 @@ export class AgentLogStore {
           output: ev.output,
           rawText: ev.rawText,
           endedAt: ev.t,
+          tokens: ev.tokens,
         };
         const p = this.flushAgent(s.agentId);
         this.inflight.add(p);
@@ -405,6 +407,10 @@ function renderXml(s: AgentState): string {
   out += `  </conversation>\n`;
   if (end) {
     out += `  <result ok="${end.ok}" reason="${escAttr(end.reason)}" elapsedMs="${end.elapsedMs}">\n`;
+    if (end.tokens) {
+      const tk = end.tokens;
+      out += `    <tokens inputChars="${tk.inputChars}" outputChars="${tk.outputChars}" totalChars="${tk.totalChars}" inputTokens="${tk.inputTokens}" outputTokens="${tk.outputTokens}" totalTokens="${tk.totalTokens}" />\n`;
+    }
     if (end.output !== undefined) {
       out += `    <output>${cdata(stringifyMaybe(end.output))}</output>\n`;
     }

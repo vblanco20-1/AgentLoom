@@ -286,6 +286,52 @@ Spawn one sub-agent. Returns `Promise<unknown>`:
 | `cwd` | `string` | `config.defaultCwd` | Working directory. New cwds boot a new opencode server. |
 | `timeoutMs` | `number` | `config.agentTimeoutMs` | Per-call deadline; on timeout the session is aborted and `null` returned. |
 | `memory` | `string \| false` | inherits `memory()` | Per-call shared-memory override. String = use this path; `false` = disable for this call. See [§5.6](#56-memorypath). |
+| `onMetrics` | `(m: AgentMetrics) => void` | — | Fires once when the agent settles (ok or not) with a rough token accounting for everything the runner pushed to opencode and got back — user prompts (including schema retries), assistant text + reasoning, and tool input args + outputs. Use it to decide whether to keep feeding more data into a follow-up `agent()` call before hitting the model's context window. Char counts are exact string lengths; token counts use a `ceil(chars / 4)` rough approximation (good enough for budget gating, not for billing). |
+
+`AgentMetrics` shape:
+
+```ts
+{
+  agentId: string;
+  ok: boolean;
+  reason: string;          // matches the agent.end reason
+  elapsedMs: number;
+  tokens: {
+    inputChars: number;    // user prompts + tool outputs the model read
+    outputChars: number;   // assistant text + reasoning + tool-call args
+    totalChars: number;
+    inputTokens: number;   // ceil(inputChars / 4)
+    outputTokens: number;
+    totalTokens: number;
+  };
+}
+```
+
+The same `tokens` object is also attached to the `agent.end` event on the
+runner event bus, so the web UI, replay logs, and the per-agent XML in
+`.runner/runs/<runId>/agents/<agentId>.xml` all see it.
+
+Threshold loop pattern (push more data into an agent until you're near the
+budget):
+
+```js
+const CTX_BUDGET = 100_000; // ≈ rough tokens
+let used = 0;
+const chunks = await fetchChunks();
+let history = "";
+for (const c of chunks) {
+  const candidate = `${history}\n${c}\nSummarise so far.`;
+  // Bail BEFORE we send if the predicted size would blow the budget;
+  // candidate.length / 4 mirrors the runner's rough math.
+  if (used + Math.ceil(candidate.length / 4) > CTX_BUDGET) break;
+  const r = await agent(candidate, {
+    schema: SUMMARY_SCHEMA,
+    onMetrics: (m) => { used = m.tokens.totalTokens; },
+  });
+  if (!r) break;
+  history = `${candidate}\n${JSON.stringify(r)}`;
+}
+```
 
 #### Failure reasons
 

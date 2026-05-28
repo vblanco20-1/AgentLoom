@@ -56,6 +56,22 @@ export function AgentCard({ agentId, runId }: { agentId: string; runId: string }
           {a.status === "running" ? "running" : a.status === "ok" ? "ok" : (a.reason ?? "fail")}
         </span>
         <SchemaBadge hasSchema={!!a.schemaHash} status={a.status} reason={a.reason} />
+        {a.tokens && (
+          <span
+            title={tokenTooltip(a.tokens)}
+            style={{
+              marginLeft: 6,
+              display: "inline-block",
+              padding: "2px 7px",
+              borderRadius: 999,
+              fontSize: 10,
+              background: "#1d2a3a",
+              color: "#9ec5ff",
+              border: "1px solid #2d3a52",
+              lineHeight: "14px",
+            }}
+          >~{fmtTokens(a.tokens.totalTokens)} tok</span>
+        )}
         <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.6 }}>{(elapsed / 1000).toFixed(1)}s</span>
       </h3>
       <div style={{ color: "#888", fontSize: 12, margin: "6px 0 8px", display: "flex", alignItems: "center", gap: 8 }}>
@@ -105,4 +121,19 @@ function actionBtnStyle(bg: string, fg: string, border: string, disabled: boolea
 function shorten(p: string, n: number): string {
   if (p.length <= n) return p;
   return "…" + p.slice(-n + 1);
+}
+
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 100_000) return (n / 1000).toFixed(1) + "k";
+  return Math.round(n / 1000) + "k";
+}
+
+function tokenTooltip(t: { inputTokens: number; outputTokens: number; totalTokens: number; inputChars: number; outputChars: number; totalChars: number }): string {
+  return (
+    `Rough token estimate (chars ÷ 4)\n` +
+    `  input  ~${fmtTokens(t.inputTokens)} tok  (${t.inputChars.toLocaleString()} chars)\n` +
+    `  output ~${fmtTokens(t.outputTokens)} tok  (${t.outputChars.toLocaleString()} chars)\n` +
+    `  total  ~${fmtTokens(t.totalTokens)} tok  (${t.totalChars.toLocaleString()} chars)`
+  );
 }

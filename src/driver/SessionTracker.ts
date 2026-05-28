@@ -34,6 +34,53 @@ export interface AssembledToolCall {
   resultEmitted: boolean;
 }
 
+// Rough conversation-size estimate for a single prompt attempt. Char counts
+// are exact (everything is just string lengths the runner already has); token
+// counts apply the conventional ~4-chars-per-token approximation. Surfaced so
+// workflows can keep pushing data into a session up to a threshold.
+//
+// Buckets are split by who emits the bytes from the model's POV:
+//   input  = user prompts we sent + tool outputs the model consumes next turn
+//   output = assistant text + reasoning + tool-call args the model produced
+export interface ConversationTokenStats {
+  inputChars: number;
+  outputChars: number;
+  totalChars: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+// Industry-standard rough approximation. Real tokenization varies by model
+// (cl100k_base ≈ 3.5-4 chars/token for English; far worse for code or CJK),
+// but for "have I burned my context budget?" 4 is good enough and cheap.
+const CHARS_PER_TOKEN = 4;
+
+export function roughTokensFromChars(chars: number): number {
+  if (chars <= 0) return 0;
+  return Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+export function emptyTokenStats(): ConversationTokenStats {
+  return {
+    inputChars: 0, outputChars: 0, totalChars: 0,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0,
+  };
+}
+
+export function addTokenStats(a: ConversationTokenStats, b: ConversationTokenStats): ConversationTokenStats {
+  const inputChars = a.inputChars + b.inputChars;
+  const outputChars = a.outputChars + b.outputChars;
+  return {
+    inputChars,
+    outputChars,
+    totalChars: inputChars + outputChars,
+    inputTokens: roughTokensFromChars(inputChars),
+    outputTokens: roughTokensFromChars(outputChars),
+    totalTokens: roughTokensFromChars(inputChars + outputChars),
+  };
+}
+
 export interface TrackerCallbacks {
   onTokenDelta: (partID: string, ordinal: number, delta: string) => void;
   onReasoningDelta: (partID: string, ordinal: number, delta: string) => void;
@@ -79,6 +126,11 @@ export class SessionTracker {
   // partIDs that belong to the user-prompt echo, so we keep skipping their
   // deltas after the initial .updated tagged them.
   private userEchoParts = new Set<string>();
+  // Rough conversation-size accounting. Output side (assistant text +
+  // reasoning + tool-call input args) is derived on demand from the
+  // textParts/reasoningParts/toolCalls maps; input side (user prompts +
+  // tool outputs the model consumes) is accumulated here as bytes pass through.
+  private userPromptChars = 0;
   private done = false;
   private endReason: EndReason | null = null;
   private endMessage = "";
@@ -148,6 +200,49 @@ export class SessionTracker {
       .sort((a, b) => a.ordinal - b.ordinal)
       .map((p) => p.text)
       .join("");
+  }
+
+  // Add a user-side prompt to the input accounting. promptRunner calls this
+  // for every attempt (initial + each schema-retry rewrite) so the running
+  // total reflects every byte we've actually pushed to opencode.
+  noteUserPrompt(text: string): void {
+    this.userPromptChars += text.length;
+  }
+
+  // Snapshot of the rough conversation size as the tracker currently sees it.
+  // Safe to call at any time; called by promptRunner once the attempt settles.
+  tokenStats(): ConversationTokenStats {
+    let assistantChars = 0;
+    for (const p of this.textParts.values()) assistantChars += p.text.length;
+    let reasoningChars = 0;
+    for (const p of this.reasoningParts.values()) reasoningChars += p.text.length;
+    let toolInputChars = 0;
+    let toolOutputChars = 0;
+    for (const tc of this.toolCalls.values()) {
+      if (tc.input !== undefined) {
+        // The model's tool-call args become assistant-side context. JSON form
+        // is what opencode actually serialises, so it's the right proxy for
+        // billable size — even if the original was a JS object.
+        try {
+          toolInputChars += JSON.stringify(tc.input).length;
+        } catch {
+          // Cyclic / unrepresentable — fall back to a stringify that won't throw.
+          toolInputChars += String(tc.input).length;
+        }
+      }
+      if (tc.output) toolOutputChars += tc.output.length;
+      if (tc.error) toolOutputChars += tc.error.length;
+    }
+    const inputChars = this.userPromptChars + toolOutputChars;
+    const outputChars = assistantChars + reasoningChars + toolInputChars;
+    return {
+      inputChars,
+      outputChars,
+      totalChars: inputChars + outputChars,
+      inputTokens: roughTokensFromChars(inputChars),
+      outputTokens: roughTokensFromChars(outputChars),
+      totalTokens: roughTokensFromChars(inputChars + outputChars),
+    };
   }
 
   finalReasoning(): string {

@@ -6,6 +6,15 @@ export type AgentEndReason =
 
 export type ToolStatus = "completed" | "error";
 
+export interface AgentTokenUsage {
+  inputChars: number;
+  outputChars: number;
+  totalChars: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface WorkflowMeta {
   name: string;
   description?: string;
@@ -25,7 +34,7 @@ export type RunnerEvent =
   | { kind: "agent.tool.result"; runId: string; agentId: string; callID: string; tool: string; status: ToolStatus; output?: string; error?: string; elapsedMs: number; t: number }
   | { kind: "agent.raw"; runId: string; agentId: string; evType: string; payload: unknown; t: number }
   | { kind: "agent.schemaRetry"; runId: string; agentId: string; attempt: number; maxRetries: number; error: string; t: number }
-  | { kind: "agent.end"; runId: string; agentId: string; ok: boolean; reason: AgentEndReason; output?: unknown; rawText?: string; elapsedMs: number; t: number };
+  | { kind: "agent.end"; runId: string; agentId: string; ok: boolean; reason: AgentEndReason; output?: unknown; rawText?: string; elapsedMs: number; tokens?: AgentTokenUsage; t: number };
 
 export interface RunIndexEntry {
   runId: string;

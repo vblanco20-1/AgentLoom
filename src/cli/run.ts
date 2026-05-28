@@ -6,6 +6,8 @@ import { loadWorkflow, runWorkflow } from "../workflow/vm.ts";
 import { EventBus } from "../bus/EventBus.ts";
 import { OpencodeDriver } from "../driver/OpencodeDriver.ts";
 import { startRunnerToolServer, type RunnerToolServerHandle } from "../driver/RunnerToolServer.ts";
+import { writeRunnerPluginFile } from "../driver/RunnerPluginFile.ts";
+import { join as joinPath } from "node:path";
 import { makeRunContext } from "../primitives/runtime.ts";
 import { makeAgentPrimitive } from "../primitives/agent.ts";
 import { pipelineImpl } from "../primitives/pipeline.ts";
@@ -113,16 +115,34 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const log = makeLogPrimitive(ctx);
   const defineTool = makeDefineToolPrimitive(ctx);
 
-  // In-process MCP server that exposes workflow-registered tools to the
-  // sub-agent. Boot first so we know the URL before opencode is asked to
-  // connect to it. Listed under a reserved name (`__runner__`) in the
-  // mcp config block to avoid collisions with user-defined MCP entries.
+  // In-process HTTP server that exposes workflow-registered tools to the
+  // sub-agent. Boot first so we know its base URL before any opencode
+  // worker is asked to connect to it.
+  //
+  // Wire path: instead of registering the server as an MCP entry (which
+  // would force opencode to prefix every tool as `__runner___<name>`),
+  // we install a `pluginPathProvider` on the driver. The first time a
+  // worktree boots, the provider generates a tiny opencode plugin file
+  // that lists every defineTool()-registered tool under its BARE name
+  // and calls back into the same HTTP server's plain-JSON /rpc/call
+  // endpoint. That way the model sees `report_file_status`, not
+  // `__runner___report_file_status`. See RunnerPluginFile.ts for the
+  // rationale.
   let runnerToolServer: RunnerToolServerHandle | null = null;
   runnerToolServer = await startRunnerToolServer(ctx);
-  driver.addMcpServer("__runner__", {
-    type: "remote",
-    url: runnerToolServer.url,
-    enabled: true,
+  const pluginFilePath = joinPath(cfg.runsDir, runId, "runner-plugin.mjs");
+  driver.setPluginPathProvider(async () => {
+    const tools = Array.from(ctx.runnerTools.values());
+    if (tools.length === 0) return null;
+    // Lock the registry here too so any late defineTool() raises the
+    // standard "registered after first agent()" warning, even when the
+    // very first boot is what triggers plugin-file generation.
+    ctx.runnerToolsLocked = true;
+    return await writeRunnerPluginFile({
+      destPath: pluginFilePath,
+      rpcUrl: runnerToolServer!.rpcUrl,
+      tools,
+    });
   });
 
   let httpServer: Awaited<ReturnType<typeof startHttpServer>> | null = null;

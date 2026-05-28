@@ -17,6 +17,40 @@ export function TranscriptModal({ agent }: { agent: AgentState }) {
   return (
     <div style={{ background: "#15161e", border: "1px solid #292932", borderRadius: 8, padding: 16 }}>
       <h3 style={{ marginTop: 0 }}>Transcript</h3>
+      {agent.tokens && (
+        <div style={{ margin: "0 0 12px", fontSize: 12 }}>
+          <strong>Token usage</strong>
+          <span style={{ marginLeft: 8, fontSize: 11, opacity: 0.6 }}>
+            (rough estimate — chars ÷ 4; counts every prompt sent, assistant
+            text + reasoning, and tool input args + outputs that crossed the
+            session)
+          </span>
+          <div style={{
+            marginTop: 6,
+            display: "grid",
+            gridTemplateColumns: "auto 1fr 1fr",
+            columnGap: 16,
+            rowGap: 2,
+            background: "#0c0c10",
+            padding: "8px 12px",
+            borderRadius: 4,
+            maxWidth: 480,
+          }}>
+            <span style={{ opacity: 0.6 }}></span>
+            <span style={{ opacity: 0.6 }}>tokens</span>
+            <span style={{ opacity: 0.6 }}>chars</span>
+            <span>input</span>
+            <span>~{agent.tokens.inputTokens.toLocaleString()}</span>
+            <span>{agent.tokens.inputChars.toLocaleString()}</span>
+            <span>output</span>
+            <span>~{agent.tokens.outputTokens.toLocaleString()}</span>
+            <span>{agent.tokens.outputChars.toLocaleString()}</span>
+            <span style={{ fontWeight: 600 }}>total</span>
+            <span style={{ fontWeight: 600 }}>~{agent.tokens.totalTokens.toLocaleString()}</span>
+            <span style={{ fontWeight: 600 }}>{agent.tokens.totalChars.toLocaleString()}</span>
+          </div>
+        </div>
+      )}
       <div style={{ marginBottom: 12 }}><strong>Prompt</strong></div>
       <pre ref={promptRef} style={{ background: "#0c0c10", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", maxHeight: 240, overflowY: "auto", fontSize: 12 }}>
         {agent.prompt}
