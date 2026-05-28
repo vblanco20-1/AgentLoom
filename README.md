@@ -42,6 +42,28 @@ doesn't cover:
   `runner.config.ts` for configuration and `--args-file` / `--args-json` /
   stdin for workflow `args`.
 
+### Prompt-cache optimization
+
+Two techniques let a fan-out workflow reuse Anthropic's prompt cache across many
+agent spawns, which is where most of the token savings on large runs come from:
+
+1. **Fixed, byte-identical agent profiles.** Write an opencode agent definition
+   (`.opencode/agent/<name>.md`, `mode: subagent`) to disk **before the first
+   `agent()` call**, put the large stable context there (role, rules, an inlined
+   reference doc like `CLAUDE.md`), then spawn with `agent({ agent: "<name>" })`.
+   opencode reads the profile once at server boot, so every agent shares a
+   byte-identical system prompt and the long prefix is cached after the first
+   spawn. Keep the per-agent variable bits (the file list, the task id) in the
+   `agent()` *user* prompt — small and at the end, where a cache miss is cheap.
+2. **In-session retries.** Schema-validation retries re-prompt within the same
+   opencode session (`buildRetryPrompt`) rather than opening a fresh context, so
+   the cached prefix survives across attempts.
+
+The rule of thumb is the usual one: **stable/reusable context at the front
+(ideally in a fixed agent profile), variable bits at the end.** See
+`examples/codebase-review.workflow.js` for both techniques in a 12-reviewer
+fan-out.
+
 
 ## Status
 
@@ -54,6 +76,19 @@ Completely vibecoded and not meant for real usage
   reference, CLI, configuration, web UI, persistence, architecture,
   troubleshooting, extending, security.
 - [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) — milestone state.
+
+### Claude Code skill
+
+This repo ships a Claude Code skill at
+[`.claude/skills/agent-runner-workflows/SKILL.md`](.claude/skills/agent-runner-workflows/SKILL.md).
+When you ask Claude Code for a "workflow", multi-agent orchestration, or to
+write/run a `*.workflow.js` in this repo, the skill steers it to author for
+agent-runner and run it through this CLI **instead of** Claude Code's built-in
+workflow runtime. It documents how to invoke the runner, how the workflow script
+differs from the built-in ones (`agent()` returns JSON-or-`null` and never
+throws, `defineTool()` custom tools, the `memory()` scratchpad), and the
+prompt-cache optimization for large fan-outs. It loads automatically; no setup
+needed.
 
 ## Quick start
 
@@ -90,7 +125,7 @@ Place `runner.config.ts` (or `.js` / `.json`) next to the workflow. See
 ## CLI
 
 ```text
-agent-runner run <workflow.js> [--args-file <p>] [--args-json <j>] [--web-port 7777] [--no-open] [--runs-dir ./.runner/runs]
+agent-runner run <workflow.js> [--args-file <p>] [--args-json <j>] [--web-port 7777] [--noweb] [--no-open] [--runs-dir ./.runner/runs]
 agent-runner web  [--port 7777] [--runs-dir ./.runner/runs]
 agent-runner replay <runId> [--web-port 7777] [--speed 1x|2x|max]
 ```

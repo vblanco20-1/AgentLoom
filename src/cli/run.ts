@@ -28,6 +28,7 @@ export interface RunOptions {
   argsJson?: string;
   config?: string;
   webPort?: number;
+  noWeb?: boolean;
   noOpen?: boolean;
   runsDir?: string;
   cwd?: string;
@@ -40,6 +41,10 @@ export async function runCli(opts: RunOptions): Promise<number> {
   const cfg = resolveConfig(rawCfg, opts.cwd ?? cwd);
   if (opts.runsDir) cfg.runsDir = opts.runsDir;
   if (opts.webPort !== undefined) cfg.web.port = opts.webPort;
+  // The web UI is on by default. `--noweb` turns it off wholesale: port 0
+  // skips the HTTP server boot below (and so the browser open too), regardless
+  // of any --web-port the user also passed.
+  if (opts.noWeb) cfg.web.port = 0;
   if (opts.noOpen) cfg.web.openBrowser = false;
 
   const wf = await loadWorkflow(opts.workflowPath);

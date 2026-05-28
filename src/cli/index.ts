@@ -11,7 +11,8 @@ cli
   .option("--args-json <json>", "Inline JSON for `args` (overrides --args-file)")
   .option("--config <path>", "Path to runner.config.{ts,js,json}")
   .option("--web-port <port>", "Web UI port (0 to disable)", { default: 7777 })
-  .option("--no-open", "Do not open browser")
+  .option("--noweb", "Disable the web UI entirely (no server, no browser). The web UI opens by default.")
+  .option("--no-open", "Start the web server but do not open the browser")
   .option("--runs-dir <path>", "Where to write NDJSON event logs", { default: ".runner/runs" })
   .option("--cwd <path>", "Default cwd for agents lacking opts.cwd")
   .option("--log-level <l>", "trace|debug|info|warn|error", { default: "info" })
@@ -26,6 +27,7 @@ cli
       argsJson: getOpt("argsJson", "args-json"),
       config: opts.config as string | undefined,
       webPort: Number(getOpt("webPort", "web-port") ?? 7777),
+      noWeb: opts.noweb === true,
       noOpen: opts.open === false,
       runsDir: getOpt("runsDir", "runs-dir") ?? ".runner/runs",
       cwd: opts.cwd as string | undefined,
